@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    hash::Hash,
-};
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     graph::{GraphIndex, NodeIndex},
@@ -78,103 +75,54 @@ where
 }
 
 fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
+    let mut dd_buckets = {
+        let mut dd_buckets = DeltaDegreeBuckets {
+            buckets: HashMap::new(), // TODO: replace with another linked list?
+            graph_ll_lookup: HashMap::new(),
+            sinks: Default::default(),
+            sources: Default::default(),
+            ll_nodes: Vec::new(),
+        };
+
+        for (i, graph_ix) in g.node_indices().enumerate() {
+            let ll_ix = LinkedListIndex(i);
+            let delta_degree = delta_degree(graph_ix, &g);
+            let classifier = graph_node_classifier(graph_ix, &g);
+
+            dd_buckets.ll_nodes.push(LinkedListNode {
+                graph_ix,
+                delta_degree,
+                classifier,
+                is_head: false,
+                prev: None,
+                next: None,
+            });
+
+            dd_buckets.graph_ll_lookup.insert(graph_ix, ll_ix);
+            dd_buckets.set_node_bucket(ll_ix);
+        }
+
+        dd_buckets
+    };
+
     let mut s_1 = VecDeque::new();
     let mut s_2 = VecDeque::new();
 
-    let mut dd_buckets = DeltaDegreeBuckets {
-        buckets: HashMap::new(),
-        graph_ll_lookup: HashMap::new(),
-        sinks: None,
-        sources: None,
-        ll_nodes: Vec::new(),
-    };
-
-    for (i, graph_ix) in g.node_indices().enumerate() {
-        let ll_ix = LinkedListIndex(i);
-        let delta_degree = delta_degree(graph_ix, &g);
-
-        dd_buckets.ll_nodes.push(LinkedListNode {
-            delta_degree,
-            graph_ix,
-            is_head: false,
-            prev: None,
-            next: None,
-        });
-
-        dd_buckets.graph_ll_lookup.insert(graph_ix, ll_ix);
-
-        if node_is_sink(graph_ix, &g) {
-            dd_buckets.set_sink(ll_ix);
-        } else if node_is_source(graph_ix, &g) {
-            dd_buckets.set_source(ll_ix);
-        } else {
-            dd_buckets.set_dd_bucket(ll_ix, delta_degree);
-        }
-    }
-
+    // TODO: consider how loops are handled here
     while g.node_count() > 0 {
-        while let Some(sink_ll_ix) = dd_buckets.sinks {
-            dd_buckets.remove(sink_ll_ix);
-            let sink_node = dd_buckets.node(sink_ll_ix).graph_ix;
-
-            // Adjust buckets of each connected outgoing node
-            for edge in g.edges_directed(sink_node, Direction::Outgoing) {
-                let other_node = edge.target();
-                let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
-
-                let delta_degree = {
-                    let other_ll_node = dd_buckets.node(other_node_ll_ix);
-                    other_ll_node.delta_degree += 1;
-                    other_ll_node.delta_degree
-                };
-
-                dd_buckets.remove(other_node_ll_ix);
-
-                if node_is_source(other_node, &g) {
-                    dd_buckets.set_source(other_node_ll_ix);
-                } else {
-                    dd_buckets.set_dd_bucket(other_node_ll_ix, delta_degree);
-                }
-            }
-
-            // Adjust buckets of each connected incoming node
-            for edge in g.edges_directed(sink_node, Direction::Incoming) {
-                let other_node = edge.source();
-                let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
-
-                let delta_degree = {
-                    let other_ll_node = dd_buckets.node(other_node_ll_ix);
-                    other_ll_node.delta_degree -= 1;
-                    other_ll_node.delta_degree
-                };
-
-                dd_buckets.remove(other_node_ll_ix);
-
-                if node_is_sink(other_node, &g) {
-                    dd_buckets.set_sink(other_node_ll_ix);
-                } else {
-                    dd_buckets.set_dd_bucket(other_node_ll_ix, delta_degree);
-                }
-            }
-        }
-        while let Some(sink_node) = g.node_indices().find(|n| node_is_sink(*n, &g)) {
-            g.remove_node(sink_node);
-            s_2.push_front(sink_node);
+        while let Some(sink_ll_ix) = dd_buckets.sinks.start {
+            let sink_graph_ix = remove_graph_node(sink_ll_ix, &mut g, &mut dd_buckets);
+            s_2.push_front(sink_graph_ix);
         }
 
-        while let Some(source_node) = g.node_indices().find(|n| node_is_source(*n, &g)) {
-            g.remove_node(source_node);
-            s_1.push_back(source_node);
+        while let Some(source_ll_ix) = dd_buckets.sources.start {
+            let source_graph_ix = remove_graph_node(source_ll_ix, &mut g, &mut dd_buckets);
+            s_1.push_back(source_graph_ix);
         }
 
-        if g.node_count() > 0 {
-            let to_remove = g
-                .node_indices()
-                .max_by_key(|n| delta_degree(*n, &g))
-                .unwrap();
-
-            g.remove_node(to_remove);
-            s_1.push_back(to_remove);
+        if let Some(highest_dd_ll_ix) = dd_buckets.highest_degree_bucket().start {
+            let highest_dd_graph_ix = remove_graph_node(highest_dd_ll_ix, &mut g, &mut dd_buckets);
+            s_1.push_back(highest_dd_graph_ix);
         }
     }
 
@@ -185,13 +133,62 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
         .collect()
 }
 
-fn node_is_sink(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> bool {
-    // TODO: `edges_directed` is O(E); replace with an O(1) check
-    !g.edges_directed(n, Direction::Outgoing).any(|_| true)
+/// Removes node from graph, and re-adjusts classification buckets. Returns the graph ID of the
+/// removed node.
+fn remove_graph_node(
+    ll_index: LinkedListIndex,
+    g: &mut SeqSourceGraph,
+    dd_buckets: &mut DeltaDegreeBuckets,
+) -> NodeIndex<SeqGraphIx> {
+    dd_buckets.remove(ll_index);
+    let graph_ix = dd_buckets.node(ll_index).graph_ix;
+
+    // Adjust buckets of each connected outgoing node
+    for edge in g.edges_directed(graph_ix, Direction::Outgoing) {
+        let other_node = edge.target();
+        let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
+
+        // Other node is losing an incoming edge; increment delta_degree
+        let other_ll_node = dd_buckets.node(other_node_ll_ix);
+        other_ll_node.delta_degree += 1;
+
+        dd_buckets.remove(other_node_ll_ix);
+
+        let classifier = graph_node_classifier(other_node, g);
+        dd_buckets.node(other_node_ll_ix).classifier = classifier;
+        dd_buckets.set_node_bucket(other_node_ll_ix);
+    }
+
+    // Adjust buckets of each connected incoming node
+    for edge in g.edges_directed(graph_ix, Direction::Incoming) {
+        let other_node = edge.source();
+        let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
+
+        // Other node is losing an outgoing edge; decrement delta_degree
+        let other_ll_node = dd_buckets.node(other_node_ll_ix);
+        other_ll_node.delta_degree -= 1;
+
+        dd_buckets.remove(other_node_ll_ix);
+
+        let classifier = graph_node_classifier(other_node, g);
+        dd_buckets.node(other_node_ll_ix).classifier = classifier;
+        dd_buckets.set_node_bucket(other_node_ll_ix);
+    }
+
+    g.remove_node(graph_ix);
+
+    graph_ix
 }
 
-fn node_is_source(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> bool {
-    !g.edges_directed(n, Direction::Incoming).any(|_| true)
+fn graph_node_classifier(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> GraphNodeClassifier {
+    // TODO: `edges_directed` is O(E); replace with an O(1) check
+    if !g.edges_directed(n, Direction::Outgoing).any(|_| true) {
+        GraphNodeClassifier::SinkOrIsolated
+    } else if !g.edges_directed(n, Direction::Incoming).any(|_| true) {
+        GraphNodeClassifier::Source
+    } else {
+        GraphNodeClassifier::Bidirectional
+    }
 }
 
 fn delta_degree(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> isize {
@@ -200,32 +197,41 @@ fn delta_degree(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> isize {
 }
 
 struct DeltaDegreeBuckets {
-    /// Linked lists for unprocessed graph nodes-so-far, grouped by their current delta degree
-    buckets: HashMap<isize, Option<LinkedListIndex>>,
-
-    graph_ll_lookup: HashMap<NodeIndex<SeqGraphIx>, LinkedListIndex>,
-
-    sinks: Option<LinkedListIndex>,
-    sources: Option<LinkedListIndex>,
-
     /// Backing storage for delta degree lists
     ll_nodes: Vec<LinkedListNode>,
+
+    sinks: LinkedListHead,
+    sources: LinkedListHead,
+
+    /// Linked lists for unprocessed graph nodes-so-far, grouped by their current delta degree
+    buckets: HashMap<isize, LinkedListHead>,
+
+    graph_ll_lookup: HashMap<NodeIndex<SeqGraphIx>, LinkedListIndex>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 struct LinkedListIndex(usize);
 
+#[derive(PartialEq, Default)]
 struct LinkedListHead {
     start: Option<LinkedListIndex>,
 }
 
-/// Represents a node in the input graph, tracking the node's current delta degree
+/// Represents a node from the input graph, tracking its current delta degree
 struct LinkedListNode {
-    delta_degree: isize,
     graph_ix: NodeIndex<SeqGraphIx>,
+    delta_degree: isize,
+    classifier: GraphNodeClassifier,
     is_head: bool,
     prev: Option<LinkedListIndex>,
     next: Option<LinkedListIndex>,
+}
+
+#[derive(Clone, Copy)]
+enum GraphNodeClassifier {
+    SinkOrIsolated,
+    Source,
+    Bidirectional,
 }
 
 impl DeltaDegreeBuckets {
@@ -233,8 +239,30 @@ impl DeltaDegreeBuckets {
         &mut self.ll_nodes[ll_index.0]
     }
 
+    /// Gets the head of the list of the specified linked list node. The list the node belongs to is
+    /// inferred by its graph state (degree, classification).
+    fn head(&mut self, ll_index: LinkedListIndex) -> &mut LinkedListHead {
+        let (classifier, delta_degree) = {
+            let node = self.node(ll_index);
+            (node.classifier, node.delta_degree)
+        };
+
+        match classifier {
+            GraphNodeClassifier::SinkOrIsolated => &mut self.sinks,
+            GraphNodeClassifier::Source => &mut self.sources,
+            GraphNodeClassifier::Bidirectional => self
+                .buckets
+                .entry(delta_degree)
+                .or_insert(Default::default()),
+        }
+    }
+
+    fn highest_degree_bucket(&mut self) -> &mut LinkedListHead {
+        todo!()
+    }
+
     fn remove(&mut self, ll_index: LinkedListIndex) {
-        let (delta_degree, is_head, prev_ix, next_ix) = {
+        let (is_head, prev_ix, next_ix) = {
             let LinkedListNode {
                 delta_degree,
                 is_head,
@@ -242,19 +270,12 @@ impl DeltaDegreeBuckets {
                 next,
                 ..
             } = self.node(ll_index);
-            (*delta_degree, *is_head, prev.take(), next.take())
+            (*is_head, prev.take(), next.take())
         };
 
         debug_assert!(
             !(self.node(ll_index).is_head && prev_ix.is_some()),
             "Linked list head node should not have prev node set"
-        );
-        debug_assert!(
-            {
-                let bucket_head = self.buckets.get(&delta_degree);
-                bucket_head == Some(&Some(ll_index))
-            },
-            "Linked list head node should be set as its bucket lookup index"
         );
 
         if let Some(prev_ix) = prev_ix {
@@ -269,109 +290,37 @@ impl DeltaDegreeBuckets {
             if is_head {
                 next_node.is_head = true;
 
-                // TODO: this is wrong if we're removing from source/sink lists
-                self.buckets.insert(delta_degree, Some(next_ix));
+                self.head(ll_index).start = Some(next_ix);
             }
         }
     }
 
-    fn set_dd_bucket(&mut self, ll_index: LinkedListIndex, bucket: isize) {
-        let bucket = self.buckets.entry(bucket).or_insert(None);
+    /// Adds the node to the appropriate bucket based on its state. Should be `.removed()` prior
+    /// to this, if necessary.
+    fn set_node_bucket(&mut self, ll_index: LinkedListIndex) {
+        let node = self.node(ll_index);
+        node.is_head = true;
 
-        DeltaDegreeBuckets::set_as_list_head(&mut self.ll_nodes, ll_index, bucket);
-    }
+        let delta_degree = node.delta_degree;
 
-    fn set_source(&mut self, ll_index: LinkedListIndex) {
-        DeltaDegreeBuckets::set_as_list_head(&mut self.ll_nodes, ll_index, &mut self.sources);
-    }
+        let list = match node.classifier {
+            GraphNodeClassifier::SinkOrIsolated => &mut self.sinks,
+            GraphNodeClassifier::Source => &mut self.sources,
+            GraphNodeClassifier::Bidirectional => self
+                .buckets
+                .entry(delta_degree)
+                .or_insert(Default::default()),
+        };
 
-    fn set_sink(&mut self, ll_index: LinkedListIndex) {
-        DeltaDegreeBuckets::set_as_list_head(&mut self.ll_nodes, ll_index, &mut self.sinks);
-    }
-
-    fn set_as_list_head(
-        nodes: &mut [LinkedListNode],
-        ll_index: LinkedListIndex,
-        list: &mut Option<LinkedListIndex>,
-    ) {
-        {
-            let node = &mut nodes[ll_index.0];
-            node.is_head = true;
-        }
-
-        if let Some(head_ix) = list {
-            let head_node = &mut nodes[head_ix.0];
+        if let Some(head_ix) = list.start {
+            let head_node = &mut self.ll_nodes[head_ix.0];
             head_node.is_head = false;
             head_node.prev = Some(ll_index);
 
-            let node = &mut nodes[ll_index.0];
-            node.next = Some(*head_ix);
+            let node = &mut self.ll_nodes[ll_index.0];
+            node.next = Some(head_ix);
         }
 
-        *list = Some(ll_index);
+        list.start = Some(ll_index);
     }
 }
-
-// impl ... {
-//     pub fn remove(&mut self, entry: LinkedListEntry) {
-//         let node = self.node_mut(entry);
-//         let prev_e = node.prev.take();
-//         let next_e = node.next.take();
-
-//         if let Some(prev_e) = prev_e {
-//             let prev_node = self.node_mut(prev_e);
-//             prev_node.next = next_e;
-//         }
-
-//         if let Some(next_e) = next_e {
-//             let next_node = self.node_mut(next_e);
-//             next_node.prev = prev_e;
-//         }
-//     }
-
-//     pub fn insert_before(&mut self, insert: LinkedListEntry, before: LinkedListEntry) {
-//         self.remove(insert);
-
-//         let insert_node = self.node_mut(insert);
-//         insert_node.next = Some(before);
-
-//         let target_node = self.node_mut(before);
-//         let prev_e = target_node.prev;
-//         target_node.prev = Some(insert);
-
-//         if let Some(prev_e) = prev_e {
-//             let prev_node = self.node_mut(prev_e);
-//             prev_node.next = Some(insert);
-
-//             let insert_node = self.node_mut(insert);
-//             insert_node.prev = Some(prev_e);
-//         }
-//     }
-
-//     pub fn insert_after(&mut self, insert: LinkedListEntry, after: LinkedListEntry) {
-//         self.remove(insert);
-
-//         let insert_node = self.node_mut(insert);
-//         insert_node.prev = Some(after);
-
-//         let target_node = self.node_mut(after);
-//         let next_e = target_node.next;
-//         target_node.next = Some(insert);
-
-//         if let Some(next_e) = next_e {
-//             let next_node = self.node_mut(next_e);
-//             next_node.prev = Some(insert);
-
-//             let insert_node = self.node_mut(insert);
-//             insert_node.next = Some(next_e);
-//         }
-//     }
-
-//     fn node(&self, index: LinkedListEntry) -> &LinkedListNode {
-//         &self.nodes[index.0]
-//     }
-
-//     fn node_mut(&mut self, index: LinkedListEntry) -> &mut LinkedListNode {
-//         &mut self.nodes[index.0]
-//     }
-// }
