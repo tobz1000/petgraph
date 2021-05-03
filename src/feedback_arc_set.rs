@@ -1,4 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    hash::Hash,
+};
 
 use crate::{
     graph::{GraphIndex, NodeIndex},
@@ -7,11 +10,9 @@ use crate::{
     Directed, Direction,
 };
 
-use linked_list::{IndexLinkedList, LinkedListEntry};
-
 /// Isomorphic to input graph; used in the process of determining a good node sequence from which to
 /// extract a feedback arc set.
-type SeqSourceGraph = StableDiGraph<Option<LinkedListEntry>, (), SeqGraphIx>;
+type SeqSourceGraph = StableDiGraph<Option<LinkedListIndex>, (), SeqGraphIx>;
 type SeqGraphIx = usize;
 
 /// \[Generic\] Finds a [feedback arc set]: a set of edges in the given directed graph, which when
@@ -77,43 +78,36 @@ where
 }
 
 fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
-    let mut s_1 = VecDeque::new();
-    let mut s_2 = VecDeque::new();
+    // let mut s_1 = VecDeque::new();
+    // let mut s_2 = VecDeque::new();
 
-    let delta_buckets = IndexLinkedList::new()
+    let mut dd_buckets = DeltaDegreeBuckets {
+        buckets: HashMap::new(),
+        sinks: None,
+        sources: None,
+        ll_nodes: Vec::new(),
+    };
 
-    // let mut sinks_or_isolated = VecDeque::new(); // V_d
-    // let mut sources = VecDeque::new(); // V_(-n+2)
-    // let mut other_nodes = VecDeque::new(); // V_(n-1)
+    for (i, graph_ix) in g.node_indices().enumerate() {
+        let ll_ix = LinkedListIndex(i);
+        let delta_degree = delta_degree(graph_ix, &g);
 
-    // for node_index in g.node_indices() {
-    //     if node_is_sink(node_index, &g) {
-    //         sinks_or_isolated.push_back(node_index);
-    //     } else if node_is_source(node_index, &g) {
-    //         sources.push_back(node_index);
-    //     } else {
-    //         // Assert that all other nodes have the expected delta degree
-    //         debug_assert!({
-    //             let dd = delta_degree(node_index, &g);
-    //             let n = g.node_count() as isize;
-    //             let expected_dd_bounds = (-n + 3)..=(n - 3);
+        dd_buckets.ll_nodes.push(LinkedListNode {
+            delta_degree,
+            graph_ix,
+            is_head: false,
+            prev: None,
+            next: None,
+        });
 
-    //             expected_dd_bounds.contains(&dd)
-    //         });
-
-    //         other_nodes.push_back(node_index);
-    //     }
-    // }
-
-    // while let Some(sink_node) = sinks_or_isolated.pop_front() {
-    //     s_2.push_front(sink_node);
-    // }
-
-    // while let Some(source_node) = sources.pop_front() {
-    //     s_1.push_back(source_node)
-    // }
-
-    // while let Some(other) = other_nodes.pop_front() {}
+        if node_is_sink(graph_ix, &g) {
+            dd_buckets.set_sink(ll_ix);
+        } else if node_is_source(graph_ix, &g) {
+            dd_buckets.set_source(ll_ix);
+        } else {
+            dd_buckets.set_dd_bucket(ll_ix, delta_degree);
+        }
+    }
 
     while g.node_count() > 0 {
         while let Some(sink_node) = g.node_indices().find(|n| node_is_sink(*n, &g)) {
@@ -137,11 +131,11 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
         }
     }
 
-    s_1.into_iter()
-        .chain(s_2)
-        .enumerate()
-        .map(|(seq_order, node_index)| (node_index.index(), seq_order))
-        .collect()
+    // s_1.into_iter()
+    //     .chain(s_2)
+    //     .enumerate()
+    //     .map(|(seq_order, node_index)| (node_index.index(), seq_order))
+    //     .collect()
 }
 
 fn node_is_sink(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> bool {
@@ -158,140 +152,171 @@ fn delta_degree(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> isize {
         - g.edges_directed(n, Direction::Incoming).count() as isize
 }
 
-mod linked_list {
-    #[derive(Clone, Copy)]
-    pub struct LinkedListEntry(usize);
+struct DeltaDegreeBuckets {
+    /// Linked lists for unprocessed graph nodes-so-far, grouped by their current delta degree
+    buckets: HashMap<isize, Option<LinkedListIndex>>,
 
-    pub struct IndexLinkedList<T> {
-        nodes: Vec<Node<T>>,
-    }
+    sinks: Option<LinkedListIndex>,
+    sources: Option<LinkedListIndex>,
 
-    impl<T> IndexLinkedList<T> {
-        pub fn new(vals: impl Iterator<Item = T>) -> Self {
-            let nodes = vals
-                .map(|v| Node {
-                    head: None,
-                    prev: None,
-                    next: None,
-                    val: v,
-                })
-                .collect();
-
-            IndexLinkedList { nodes }
-        }
-        pub fn val(&self, entry: LinkedListEntry) -> &T {
-            &self.node(entry).val
-        }
-
-        pub fn val_mut(&mut self, entry: LinkedListEntry) -> &mut T {
-            &mut self.node_mut(entry).val
-        }
-
-        pub fn remove(&mut self, entry: LinkedListEntry) {
-            let node = self.node_mut(entry);
-            let prev_e = node.prev.take();
-            let next_e = node.next.take();
-
-            if let Some(prev_e) = prev_e {
-                let prev_node = self.node_mut(prev_e);
-                prev_node.next = next_e;
-            }
-
-            if let Some(next_e) = next_e {
-                let next_node = self.node_mut(next_e);
-                next_node.prev = prev_e;
-            }
-        }
-
-        pub fn insert_before(&mut self, insert: LinkedListEntry, before: LinkedListEntry) {
-            self.remove(insert);
-
-            let insert_node = self.node_mut(insert);
-            insert_node.next = Some(before);
-
-            let target_node = self.node_mut(before);
-            let prev_e = target_node.prev;
-            target_node.prev = Some(insert);
-
-            if let Some(prev_e) = prev_e {
-                let prev_node = self.node_mut(prev_e);
-                prev_node.next = Some(insert);
-
-                let insert_node = self.node_mut(insert);
-                insert_node.prev = Some(prev_e);
-            }
-        }
-
-        pub fn insert_after(&mut self, insert: LinkedListEntry, after: LinkedListEntry) {
-            self.remove(insert);
-
-            let insert_node = self.node_mut(insert);
-            insert_node.prev = Some(after);
-
-            let target_node = self.node_mut(after);
-            let next_e = target_node.next;
-            target_node.next = Some(insert);
-
-            if let Some(next_e) = next_e {
-                let next_node = self.node_mut(next_e);
-                next_node.prev = Some(insert);
-
-                let insert_node = self.node_mut(insert);
-                insert_node.next = Some(next_e);
-            }
-        }
-
-        fn node(&self, index: LinkedListEntry) -> &Node<T> {
-            &self.nodes[index.0]
-        }
-
-        fn node_mut(&mut self, index: LinkedListEntry) -> &mut Node<T> {
-            &mut self.nodes[index.0]
-        }
-    }
-
-    struct Node<T> {
-        head: Option<Head>,
-        prev: Option<LinkedListEntry>,
-        next: Option<LinkedListEntry>,
-        val: T,
-    }
-
-    struct Head {
-        first: Option<LinkedListEntry>
-    }
-
-    // /// Internal doubly-linked list implementation. Nodes pre-allocated and connected via references
-    // /// (rather than boxed as in [`std::collections::LinkedList`]).
-    // pub struct LinkedList<'a, T> {
-    //     pub head: Option<&'a mut LinkedListNode<'a, T>>,
-    //     pub tail: Option<&'a mut LinkedListNode<'a, T>>,
-    // }
-
-    // pub struct LinkedListNode<'a, T> {
-    //     pub prev: Option<&'a mut LinkedListNode<'a, T>>,
-    //     pub next: Option<&'a mut LinkedListNode<'a, T>>,
-    //     val: T,
-    // }
-
-    // impl<'a, T> LinkedListNode<'a, T> {
-    //     pub fn remove(&mut self) {
-    //         let prev = self.prev.take();
-    //         let next = self.next.take();
-
-    //         // match (prev, next) {
-    //         //     (Some(prev), Some(next)) => {
-    //         //         prev.next =
-    //         //     }
-    //         // }
-
-    //         if let Some(prev) = prev {
-    //             prev.next = next;
-    //         }
-
-    //         if let Some(next) = next {
-    //             next.prev = prev;
-    //         }
-    //     }
-    // }
+    /// Backing storage for delta degree lists
+    ll_nodes: Vec<LinkedListNode>,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+struct LinkedListIndex(usize);
+
+/// Represents a node in the input graph, tracking the node's current delta degree
+struct LinkedListNode {
+    delta_degree: isize,
+    graph_ix: NodeIndex<SeqGraphIx>,
+    is_head: bool,
+    prev: Option<LinkedListIndex>,
+    next: Option<LinkedListIndex>,
+}
+
+impl DeltaDegreeBuckets {
+    fn node(&mut self, ll_index: LinkedListIndex) -> &mut LinkedListNode {
+        &mut self.ll_nodes[ll_index.0]
+    }
+
+    fn remove(&mut self, ll_index: LinkedListIndex) {
+        let (delta_degree, is_head, prev_ix, next_ix) = {
+            let LinkedListNode {
+                delta_degree,
+                is_head,
+                prev,
+                next,
+                ..
+            } = self.node(ll_index);
+            (*delta_degree, *is_head, prev.take(), next.take())
+        };
+
+        debug_assert!(
+            !(self.node(ll_index).is_head && prev_ix.is_some()),
+            "Linked list head node should not have prev node set"
+        );
+        debug_assert!(
+            {
+                let bucket_head = self.buckets.get(&delta_degree);
+                bucket_head == Some(&Some(ll_index))
+            },
+            "Linked list head node should be set as its bucket lookup index"
+        );
+
+        if let Some(prev_ix) = prev_ix {
+            let prev_node = self.node(prev_ix);
+            prev_node.next = next_ix;
+        }
+
+        if let Some(next_ix) = next_ix {
+            let next_node = self.node(next_ix);
+            next_node.prev = prev_ix;
+
+            if is_head {
+                next_node.is_head = true;
+                self.buckets.insert(delta_degree, Some(next_ix));
+            }
+        }
+    }
+
+    fn set_dd_bucket(&mut self, ll_index: LinkedListIndex, bucket: isize) {
+        let bucket = self.buckets.entry(bucket).or_insert(None);
+
+        DeltaDegreeBuckets::set_as_list_head(&mut self.ll_nodes, ll_index, bucket);
+    }
+
+    fn set_source(&mut self, ll_index: LinkedListIndex) {
+        DeltaDegreeBuckets::set_as_list_head(&mut self.ll_nodes, ll_index, &mut self.sources);
+    }
+
+    fn set_sink(&mut self, ll_index: LinkedListIndex) {
+        DeltaDegreeBuckets::set_as_list_head(&mut self.ll_nodes, ll_index, &mut self.sinks);
+    }
+
+    fn set_as_list_head(
+        nodes: &mut [LinkedListNode],
+        ll_index: LinkedListIndex,
+        list: &mut Option<LinkedListIndex>,
+    ) {
+        {
+            let node = &mut nodes[ll_index.0];
+            node.is_head = true;
+        }
+
+        if let Some(head_ix) = list {
+            let head_node = &mut nodes[head_ix.0];
+            head_node.is_head = false;
+            head_node.prev = Some(ll_index);
+
+            let node = &mut nodes[ll_index.0];
+            node.next = Some(*head_ix);
+        }
+
+        *list = Some(ll_index);
+    }
+}
+
+// impl ... {
+//     pub fn remove(&mut self, entry: LinkedListEntry) {
+//         let node = self.node_mut(entry);
+//         let prev_e = node.prev.take();
+//         let next_e = node.next.take();
+
+//         if let Some(prev_e) = prev_e {
+//             let prev_node = self.node_mut(prev_e);
+//             prev_node.next = next_e;
+//         }
+
+//         if let Some(next_e) = next_e {
+//             let next_node = self.node_mut(next_e);
+//             next_node.prev = prev_e;
+//         }
+//     }
+
+//     pub fn insert_before(&mut self, insert: LinkedListEntry, before: LinkedListEntry) {
+//         self.remove(insert);
+
+//         let insert_node = self.node_mut(insert);
+//         insert_node.next = Some(before);
+
+//         let target_node = self.node_mut(before);
+//         let prev_e = target_node.prev;
+//         target_node.prev = Some(insert);
+
+//         if let Some(prev_e) = prev_e {
+//             let prev_node = self.node_mut(prev_e);
+//             prev_node.next = Some(insert);
+
+//             let insert_node = self.node_mut(insert);
+//             insert_node.prev = Some(prev_e);
+//         }
+//     }
+
+//     pub fn insert_after(&mut self, insert: LinkedListEntry, after: LinkedListEntry) {
+//         self.remove(insert);
+
+//         let insert_node = self.node_mut(insert);
+//         insert_node.prev = Some(after);
+
+//         let target_node = self.node_mut(after);
+//         let next_e = target_node.next;
+//         target_node.next = Some(insert);
+
+//         if let Some(next_e) = next_e {
+//             let next_node = self.node_mut(next_e);
+//             next_node.prev = Some(insert);
+
+//             let insert_node = self.node_mut(insert);
+//             insert_node.next = Some(next_e);
+//         }
+//     }
+
+//     fn node(&self, index: LinkedListEntry) -> &LinkedListNode {
+//         &self.nodes[index.0]
+//     }
+
+//     fn node_mut(&mut self, index: LinkedListEntry) -> &mut LinkedListNode {
+//         &mut self.nodes[index.0]
+//     }
+// }
