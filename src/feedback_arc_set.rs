@@ -12,7 +12,7 @@ use crate::{
 
 /// Isomorphic to input graph; used in the process of determining a good node sequence from which to
 /// extract a feedback arc set.
-type SeqSourceGraph = StableDiGraph<Option<LinkedListIndex>, (), SeqGraphIx>;
+type SeqSourceGraph = StableDiGraph<(), (), SeqGraphIx>;
 type SeqGraphIx = usize;
 
 /// \[Generic\] Finds a [feedback arc set]: a set of edges in the given directed graph, which when
@@ -78,11 +78,12 @@ where
 }
 
 fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
-    // let mut s_1 = VecDeque::new();
-    // let mut s_2 = VecDeque::new();
+    let mut s_1 = VecDeque::new();
+    let mut s_2 = VecDeque::new();
 
     let mut dd_buckets = DeltaDegreeBuckets {
         buckets: HashMap::new(),
+        graph_ll_lookup: HashMap::new(),
         sinks: None,
         sources: None,
         ll_nodes: Vec::new(),
@@ -100,6 +101,8 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
             next: None,
         });
 
+        dd_buckets.graph_ll_lookup.insert(graph_ix, ll_ix);
+
         if node_is_sink(graph_ix, &g) {
             dd_buckets.set_sink(ll_ix);
         } else if node_is_source(graph_ix, &g) {
@@ -110,6 +113,50 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
     }
 
     while g.node_count() > 0 {
+        while let Some(sink_ll_ix) = dd_buckets.sinks {
+            dd_buckets.remove(sink_ll_ix);
+            let sink_node = dd_buckets.node(sink_ll_ix).graph_ix;
+
+            // Adjust buckets of each connected outgoing node
+            for edge in g.edges_directed(sink_node, Direction::Outgoing) {
+                let other_node = edge.target();
+                let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
+
+                let delta_degree = {
+                    let other_ll_node = dd_buckets.node(other_node_ll_ix);
+                    other_ll_node.delta_degree += 1;
+                    other_ll_node.delta_degree
+                };
+
+                dd_buckets.remove(other_node_ll_ix);
+
+                if node_is_source(other_node, &g) {
+                    dd_buckets.set_source(other_node_ll_ix);
+                } else {
+                    dd_buckets.set_dd_bucket(other_node_ll_ix, delta_degree);
+                }
+            }
+
+            // Adjust buckets of each connected incoming node
+            for edge in g.edges_directed(sink_node, Direction::Incoming) {
+                let other_node = edge.source();
+                let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
+
+                let delta_degree = {
+                    let other_ll_node = dd_buckets.node(other_node_ll_ix);
+                    other_ll_node.delta_degree -= 1;
+                    other_ll_node.delta_degree
+                };
+
+                dd_buckets.remove(other_node_ll_ix);
+
+                if node_is_sink(other_node, &g) {
+                    dd_buckets.set_sink(other_node_ll_ix);
+                } else {
+                    dd_buckets.set_dd_bucket(other_node_ll_ix, delta_degree);
+                }
+            }
+        }
         while let Some(sink_node) = g.node_indices().find(|n| node_is_sink(*n, &g)) {
             g.remove_node(sink_node);
             s_2.push_front(sink_node);
@@ -131,11 +178,11 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
         }
     }
 
-    // s_1.into_iter()
-    //     .chain(s_2)
-    //     .enumerate()
-    //     .map(|(seq_order, node_index)| (node_index.index(), seq_order))
-    //     .collect()
+    s_1.into_iter()
+        .chain(s_2)
+        .enumerate()
+        .map(|(seq_order, node_index)| (node_index.index(), seq_order))
+        .collect()
 }
 
 fn node_is_sink(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> bool {
@@ -156,6 +203,8 @@ struct DeltaDegreeBuckets {
     /// Linked lists for unprocessed graph nodes-so-far, grouped by their current delta degree
     buckets: HashMap<isize, Option<LinkedListIndex>>,
 
+    graph_ll_lookup: HashMap<NodeIndex<SeqGraphIx>, LinkedListIndex>,
+
     sinks: Option<LinkedListIndex>,
     sources: Option<LinkedListIndex>,
 
@@ -165,6 +214,10 @@ struct DeltaDegreeBuckets {
 
 #[derive(Clone, Copy, PartialEq)]
 struct LinkedListIndex(usize);
+
+struct LinkedListHead {
+    start: Option<LinkedListIndex>,
+}
 
 /// Represents a node in the input graph, tracking the node's current delta degree
 struct LinkedListNode {
@@ -215,6 +268,8 @@ impl DeltaDegreeBuckets {
 
             if is_head {
                 next_node.is_head = true;
+
+                // TODO: this is wrong if we're removing from source/sink lists
                 self.buckets.insert(delta_degree, Some(next_ix));
             }
         }
