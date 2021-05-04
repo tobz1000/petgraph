@@ -109,13 +109,7 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
     let mut s_2 = VecDeque::new();
 
     // TODO: consider how loop edges are handled here
-    let mut ct = 0;
     while g.node_count() > 0 {
-        ct += 1;
-        if ct >= 5 {
-            break;
-        }
-        // dbg!(&dd_buckets);
         while let Some(sink_ll_ix) = dd_buckets.sinks.start {
             let sink_graph_ix = remove_graph_node(sink_ll_ix, &mut g, &mut dd_buckets);
             s_2.push_front(sink_graph_ix);
@@ -151,9 +145,26 @@ fn remove_graph_node(
 
     // Adjust buckets of each connected outgoing node
     for edge in g.edges_directed(graph_ix, Direction::Outgoing) {
-        let other_node = edge.target();
-        let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
-        let classifier = graph_node_classifier(other_node, g);
+        let other_node_graph_ix = edge.target();
+
+        if other_node_graph_ix == graph_ix {
+            // Loop edge
+            continue;
+        }
+
+        let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node_graph_ix];
+        let classifier = graph_node_classifier(other_node_graph_ix, g);
+        // TODO: cannot read correct classifier from the petgraph-graph here, because the original node has not yet been removed, so the "other" node's edge list is not correct for reading
+        // let classifier = match g
+        //     .edges_directed(other_node_graph_ix, Direction::Incoming)
+        //     .count()
+        // {
+        //     0 => panic!(),
+        //     // The only remaining incoming edge on this node is the one to be removed; it will then
+        //     // become a source
+        //     1 => GraphNodeClassifier::Source,
+        //     _ => GraphNodeClassifier,
+        // };
 
         dd_buckets.remove(other_node_ll_ix);
 
@@ -167,6 +178,12 @@ fn remove_graph_node(
     // Adjust buckets of each connected incoming node
     for edge in g.edges_directed(graph_ix, Direction::Incoming) {
         let other_node_graph_ix = edge.source();
+
+        if other_node_graph_ix == graph_ix {
+            // Loop edge
+            continue;
+        }
+
         let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node_graph_ix];
         let classifier = graph_node_classifier(other_node_graph_ix, g);
 
@@ -180,7 +197,6 @@ fn remove_graph_node(
     }
 
     assert!(g.remove_node(graph_ix).is_some());
-    dbg!(g.node_count());
 
     graph_ix
 }
@@ -312,9 +328,11 @@ impl DeltaDegreeBuckets {
 
             if is_head {
                 next_node.is_head = true;
-
-                self.head(ll_index).start = Some(next_ix);
             }
+        }
+
+        if is_head {
+            self.head(ll_index).start = next_ix;
         }
     }
 
@@ -354,5 +372,43 @@ impl DeltaDegreeBuckets {
         }
 
         list.start = Some(ll_index);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        algo::is_cyclic_directed,
+        graph::{DiGraph, EdgeIndex},
+        visit::EdgeRef,
+    };
+
+    use super::greedy_feedback_arc_set;
+
+    #[test]
+    fn fas_debug() {
+        let mut g = DiGraph::<(), ()>::with_capacity(0, 0);
+
+        for _ in 0..4 {
+            g.add_node(());
+        }
+
+        for i in g.node_indices() {
+            for j in g.node_indices() {
+                // if i >= j {
+                //     continue;
+                // }
+
+                g.add_edge(i, j, ());
+            }
+        }
+
+        let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&g).map(|e| e.id()).collect();
+
+        for edge_id in fas {
+            g.remove_edge(edge_id);
+        }
+
+        assert!(!is_cyclic_directed(&g));
     }
 }
