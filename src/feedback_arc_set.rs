@@ -108,8 +108,14 @@ fn good_node_sequence(mut g: SeqSourceGraph) -> HashMap<SeqGraphIx, usize> {
     let mut s_1 = VecDeque::new();
     let mut s_2 = VecDeque::new();
 
-    // TODO: consider how loops are handled here
+    // TODO: consider how loop edges are handled here
+    let mut ct = 0;
     while g.node_count() > 0 {
+        ct += 1;
+        if ct >= 5 {
+            break;
+        }
+        // dbg!(&dd_buckets);
         while let Some(sink_ll_ix) = dd_buckets.sinks.start {
             let sink_graph_ix = remove_graph_node(sink_ll_ix, &mut g, &mut dd_buckets);
             s_2.push_front(sink_graph_ix);
@@ -147,35 +153,34 @@ fn remove_graph_node(
     for edge in g.edges_directed(graph_ix, Direction::Outgoing) {
         let other_node = edge.target();
         let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
+        let classifier = graph_node_classifier(other_node, g);
+
+        dd_buckets.remove(other_node_ll_ix);
 
         // Other node is losing an incoming edge; increment delta_degree
         let other_ll_node = dd_buckets.node(other_node_ll_ix);
         other_ll_node.delta_degree += 1;
-
-        dd_buckets.remove(other_node_ll_ix);
-
-        let classifier = graph_node_classifier(other_node, g);
-        dd_buckets.node(other_node_ll_ix).classifier = classifier;
+        other_ll_node.classifier = classifier;
         dd_buckets.set_node_bucket(other_node_ll_ix);
     }
 
     // Adjust buckets of each connected incoming node
     for edge in g.edges_directed(graph_ix, Direction::Incoming) {
-        let other_node = edge.source();
-        let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node];
+        let other_node_graph_ix = edge.source();
+        let other_node_ll_ix = dd_buckets.graph_ll_lookup[&other_node_graph_ix];
+        let classifier = graph_node_classifier(other_node_graph_ix, g);
+
+        dd_buckets.remove(other_node_ll_ix);
 
         // Other node is losing an outgoing edge; decrement delta_degree
         let other_ll_node = dd_buckets.node(other_node_ll_ix);
         other_ll_node.delta_degree -= 1;
-
-        dd_buckets.remove(other_node_ll_ix);
-
-        let classifier = graph_node_classifier(other_node, g);
-        dd_buckets.node(other_node_ll_ix).classifier = classifier;
+        other_ll_node.classifier = classifier;
         dd_buckets.set_node_bucket(other_node_ll_ix);
     }
 
-    g.remove_node(graph_ix);
+    assert!(g.remove_node(graph_ix).is_some());
+    dbg!(g.node_count());
 
     graph_ix
 }
@@ -196,6 +201,7 @@ fn delta_degree(n: NodeIndex<SeqGraphIx>, g: &SeqSourceGraph) -> isize {
         - g.edges_directed(n, Direction::Incoming).count() as isize
 }
 
+#[derive(Debug)]
 struct DeltaDegreeBuckets {
     /// Backing storage for delta degree lists
     ll_nodes: Vec<LinkedListNode>,
@@ -209,15 +215,16 @@ struct DeltaDegreeBuckets {
     graph_ll_lookup: HashMap<NodeIndex<SeqGraphIx>, LinkedListIndex>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct LinkedListIndex(usize);
 
-#[derive(PartialEq, Default)]
+#[derive(PartialEq, Default, Debug)]
 struct LinkedListHead {
     start: Option<LinkedListIndex>,
 }
 
 /// Represents a node from the input graph, tracking its current delta degree
+#[derive(Debug)]
 struct LinkedListNode {
     graph_ix: NodeIndex<SeqGraphIx>,
     delta_degree: isize,
@@ -227,7 +234,7 @@ struct LinkedListNode {
     next: Option<LinkedListIndex>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum GraphNodeClassifier {
     SinkOrIsolated,
     Source,
@@ -258,34 +265,50 @@ impl DeltaDegreeBuckets {
     }
 
     fn highest_degree_bucket(&mut self) -> &mut LinkedListHead {
-        todo!()
+        // TODO: replace this with O(1) operation, probably by replacing HashMap with linked list
+        self.buckets.iter_mut().max_by_key(|(k, _v)| *k).unwrap().1
     }
 
     fn remove(&mut self, ll_index: LinkedListIndex) {
         let (is_head, prev_ix, next_ix) = {
-            let LinkedListNode {
-                delta_degree,
-                is_head,
-                prev,
-                next,
-                ..
-            } = self.node(ll_index);
-            (*is_head, prev.take(), next.take())
-        };
+            let ll_node = self.node(ll_index);
 
-        debug_assert!(
-            !(self.node(ll_index).is_head && prev_ix.is_some()),
-            "Linked list head node should not have prev node set"
-        );
+            debug_assert!(
+                !(ll_node.is_head && ll_node.prev.is_some()),
+                "Linked list head node should not have prev node set"
+            );
+
+            let is_head = ll_node.is_head;
+            ll_node.is_head = false;
+            let prev = ll_node.prev.take();
+            let next = ll_node.next.take();
+
+            (is_head, prev, next)
+        };
 
         if let Some(prev_ix) = prev_ix {
             let prev_node = self.node(prev_ix);
+
+            debug_assert!(
+                prev_node.next == Some(ll_index),
+                "'prev' node should have its 'next' set as this node"
+            );
+
             prev_node.next = next_ix;
         }
 
         if let Some(next_ix) = next_ix {
             let next_node = self.node(next_ix);
             next_node.prev = prev_ix;
+
+            debug_assert!(
+                next_node.prev == Some(ll_index),
+                "'next' node should have its 'prev' set as this node"
+            );
+            debug_assert!(
+                !next_node.is_head,
+                "'next' node should not have is_head=true"
+            );
 
             if is_head {
                 next_node.is_head = true;
@@ -295,10 +318,15 @@ impl DeltaDegreeBuckets {
         }
     }
 
-    /// Adds the node to the appropriate bucket based on its state. Should be `.removed()` prior
+    /// Adds the node to the appropriate bucket based on its state. Should be `.remove()`d prior
     /// to this, if necessary.
     fn set_node_bucket(&mut self, ll_index: LinkedListIndex) {
         let node = self.node(ll_index);
+
+        debug_assert!(!node.is_head);
+        debug_assert!(node.prev.is_none());
+        debug_assert!(node.next.is_none());
+
         node.is_head = true;
 
         let delta_degree = node.delta_degree;
@@ -314,6 +342,10 @@ impl DeltaDegreeBuckets {
 
         if let Some(head_ix) = list.start {
             let head_node = &mut self.ll_nodes[head_ix.0];
+
+            debug_assert!(head_node.is_head);
+            debug_assert!(head_node.prev.is_none());
+
             head_node.is_head = false;
             head_node.prev = Some(ll_index);
 
