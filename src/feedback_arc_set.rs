@@ -126,7 +126,7 @@ fn good_node_sequence(
     for i in 0..nodes.len() {
         let fas_ix = FasNodeIndex(i);
         buckets
-            .get_bucket(fas_ix, &mut nodes)
+            .suitable_bucket(fas_ix, &mut nodes)
             .push_front(fas_ix, &mut nodes);
     }
 
@@ -138,18 +138,12 @@ fn good_node_sequence(
 
         while let Some(sink_fas_ix) = buckets.sinks_or_isolated.pop(&mut nodes) {
             some_moved = true;
-            buckets
-                .get_bucket(sink_fas_ix, &mut nodes)
-                .remove(sink_fas_ix, &mut nodes);
             buckets.update_neighbour_node_buckets(sink_fas_ix, &mut nodes);
             s_2.push_front(nodes[sink_fas_ix.0].graph_ix);
         }
 
         while let Some(source_fas_ix) = buckets.sources.pop(&mut nodes) {
             some_moved = true;
-            buckets
-                .get_bucket(source_fas_ix, &mut nodes)
-                .remove(source_fas_ix, &mut nodes);
             buckets.update_neighbour_node_buckets(source_fas_ix, &mut nodes);
             s_1.push_back(nodes[source_fas_ix.0].graph_ix);
         }
@@ -162,9 +156,6 @@ fn good_node_sequence(
         {
             if let Some(highest_dd_fas_ix) = bucket.pop(&mut nodes) {
                 some_moved = true;
-                buckets
-                    .get_bucket(highest_dd_fas_ix, &mut nodes)
-                    .remove(highest_dd_fas_ix, &mut nodes);
                 buckets.update_neighbour_node_buckets(highest_dd_fas_ix, &mut nodes);
                 s_1.push_back(nodes[highest_dd_fas_ix.0].graph_ix);
             }
@@ -265,6 +256,30 @@ impl LinkedListHead {
 
     /// `remove_ix` **must** be a member of the list headed by `self`
     fn remove(&mut self, remove_ix: FasNodeIndex, nodes: &mut [FasNode]) {
+        // Assert that the node to remove is currently in this list
+        debug_assert!(
+            {
+                let mut node_ix = self.start;
+
+                loop {
+                    if let Some(n_ix) = node_ix {
+                        if n_ix == remove_ix {
+                            break true;
+                        }
+
+                        node_ix = nodes[n_ix.0]
+                            .ll_entry
+                            .as_ref()
+                            .expect("node in linked list should have `ll_entry` populated")
+                            .next;
+                    } else {
+                        break false;
+                    }
+                }
+            },
+            "expected list to contain node to remove"
+        );
+
         let remove_node = &mut nodes[remove_ix.0];
         let ll_entry = remove_node.ll_entry.take().unwrap();
 
@@ -287,7 +302,7 @@ impl LinkedListHead {
 
 impl Buckets {
     /// Returns the bucket that a node should belong to, not the list it's necessarily currently in
-    fn get_bucket(&mut self, ix: FasNodeIndex, nodes: &mut [FasNode]) -> &mut LinkedListHead {
+    fn suitable_bucket(&mut self, ix: FasNodeIndex, nodes: &mut [FasNode]) -> &mut LinkedListHead {
         let node = &mut nodes[ix.0];
 
         if node.out_degree == 0 {
@@ -315,12 +330,13 @@ impl Buckets {
                 continue;
             }
 
-            self.get_bucket(out_ix, nodes).remove(ix, nodes);
+            self.suitable_bucket(out_ix, nodes).remove(out_ix, nodes);
 
             // Other node has lost an in-edge; reduce in-degree by 1
             nodes[out_ix.0].in_degree -= 1;
 
-            self.get_bucket(out_ix, nodes).push_front(ix, nodes);
+            self.suitable_bucket(out_ix, nodes)
+                .push_front(out_ix, nodes);
         }
 
         for i in 0..nodes[ix.0].in_edges.len() {
@@ -335,12 +351,12 @@ impl Buckets {
                 continue;
             }
 
-            self.get_bucket(in_ix, nodes).remove(ix, nodes);
+            self.suitable_bucket(in_ix, nodes).remove(in_ix, nodes);
 
             // Other node has lost an out-edge; reduce out-degree by 1
             nodes[in_ix.0].out_degree -= 1;
 
-            self.get_bucket(in_ix, nodes).push_front(ix, nodes);
+            self.suitable_bucket(in_ix, nodes).push_front(in_ix, nodes);
         }
     }
 }
