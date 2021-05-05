@@ -80,128 +80,97 @@ where
 fn good_node_sequence(
     edge_refs: impl Iterator<Item = (NodeIndex<SeqGraphIx>, NodeIndex<SeqGraphIx>)>,
 ) -> HashMap<SeqGraphIx, usize> {
-    let mut dd_buckets = DeltaDegreeBuckets {
-        nodes: Vec::new(),
-        sinks: Default::default(),
-        sources: Default::default(),
-        buckets: HashMap::new(), // TODO: replace with another linked list?
-        graph_ix_lookup: HashMap::new(),
+    let mut nodes = Vec::new(); // Backing storage for nodes
+    let mut buckets = Buckets {
+        sinks_or_isolated: LinkedListHead::default(),
+        sources: LinkedListHead::default(),
+        bidirectional: HashMap::new(),
     };
-
-    let fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>| -> FasNodeIndex {
-        match dd_buckets.graph_ix_lookup.get(&g_ix) {
-            Some(fas_ix) => *fas_ix,
-            None => {
-                let fas_ix = FasNodeIndex(dd_buckets.nodes.len());
-
-                dd_buckets.nodes.push(FasNode {
-                    graph_ix: g_ix,
-                    out_edges: Vec::new(),
-                    in_edges: Vec::new(),
-                    out_degree: 0,
-                    in_degree: 0,
-                    ll_entry: None,
-                });
-
-                dd_buckets.graph_ix_lookup.insert(g_ix, fas_ix);
-
-                fas_ix
-            }
-        }
-    };
-
-    let push_to_bucket = |fas_ix: FasNodeIndex| {
-        let node = &mut dd_buckets.nodes[fas_ix.0];
-
-        let list = if node.out_degree == 0 {
-            &mut dd_buckets.sinks
-        } else if node.in_degree == 0 {
-            &mut dd_buckets.sources
-        } else {
-            let delta_degree = node.out_degree as isize - node.in_degree as isize;
-            dd_buckets
-                .buckets
-                .entry(delta_degree)
-                .or_insert(Default::default())
-        };
-
-        list.push_front(fas_ix, &mut dd_buckets.nodes);
-    };
+    // Lookup of node indices from input graph to indices into `nodes`
+    let mut graph_ix_lookup = HashMap::new();
 
     // Build node entries
     for (from_g_ix, to_g_ix) in edge_refs {
+        let mut fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>| -> FasNodeIndex {
+            match graph_ix_lookup.get(&g_ix) {
+                Some(fas_ix) => *fas_ix,
+                None => {
+                    let fas_ix = FasNodeIndex(nodes.len());
+
+                    nodes.push(FasNode {
+                        graph_ix: g_ix,
+                        out_edges: Vec::new(),
+                        in_edges: Vec::new(),
+                        out_degree: 0,
+                        in_degree: 0,
+                        ll_entry: None,
+                    });
+
+                    graph_ix_lookup.insert(g_ix, fas_ix);
+
+                    fas_ix
+                }
+            }
+        };
+
         let from_fas_ix = fas_node_entry(from_g_ix);
         let to_fas_ix = fas_node_entry(to_g_ix);
 
-        dd_buckets.nodes[from_fas_ix.0].out_edges.push(to_fas_ix);
-        dd_buckets.nodes[to_fas_ix.0].out_edges.push(from_fas_ix);
+        nodes[from_fas_ix.0].out_edges.push(to_fas_ix);
+        nodes[to_fas_ix.0].out_edges.push(from_fas_ix);
     }
 
     // Set initial in/out-degrees
-    for node in dd_buckets.nodes {
+    for node in nodes.iter_mut() {
         node.out_degree = node.out_edges.len();
         node.in_degree = node.in_edges.len();
     }
 
     // Add nodes to initial lists
-    for (i, node) in dd_buckets.nodes.iter_mut().enumerate() {
+    for i in 0..nodes.len() {
         let fas_ix = FasNodeIndex(i);
-        push_to_bucket(fas_ix);
+        buckets
+            .get_bucket(fas_ix, &mut nodes)
+            .push_front(fas_ix, &mut nodes);
     }
 
     let mut s_1 = VecDeque::new();
     let mut s_2 = VecDeque::new();
 
-    let update_connected_node_buckets = |node: &FasNode| {
-        for out_ix in node.out_edges {
-            let out_node = &mut dd_buckets.nodes[out_ix.0];
-            out_node.in_degree -= 1;
-
-            // Ignore nodes which have already been moved to the good sequence
-            if out_node.ll_entry.is_some() {
-                push_to_bucket(out_ix);
-            }
-        }
-
-        for in_ix in node.in_edges {
-            let in_node = &mut dd_buckets.nodes[in_ix.0];
-            in_node.in_degree += 1;
-
-            // Ignore nodes which have already been moved to the good sequence
-            if in_node.ll_entry.is_some() {
-                push_to_bucket(in_ix);
-            }
-        }
-    };
-
     loop {
         let mut some_moved = false;
 
-        while let Some(sink_fas_ix) = dd_buckets.sinks.pop(&mut dd_buckets.nodes) {
+        while let Some(sink_fas_ix) = buckets.sinks_or_isolated.pop(&mut nodes) {
             some_moved = true;
-            let sink_node = &dd_buckets.nodes[sink_fas_ix.0];
-            update_connected_node_buckets(sink_node);
-            s_2.push_front(sink_node.graph_ix);
+            buckets
+                .get_bucket(sink_fas_ix, &mut nodes)
+                .remove(sink_fas_ix, &mut nodes);
+            buckets.update_neighbour_node_buckets(sink_fas_ix, &mut nodes);
+            s_2.push_front(nodes[sink_fas_ix.0].graph_ix);
         }
 
-        while let Some(source_fas_ix) = dd_buckets.sources.pop(&mut dd_buckets.nodes) {
+        while let Some(source_fas_ix) = buckets.sources.pop(&mut nodes) {
             some_moved = true;
-            let source_node = &dd_buckets.nodes[source_fas_ix.0];
-            update_connected_node_buckets(source_node);
-            s_1.push_back(source_node.graph_ix);
+            buckets
+                .get_bucket(source_fas_ix, &mut nodes)
+                .remove(source_fas_ix, &mut nodes);
+            buckets.update_neighbour_node_buckets(source_fas_ix, &mut nodes);
+            s_1.push_back(nodes[source_fas_ix.0].graph_ix);
         }
 
-        if let Some(bucket) = dd_buckets
-            .buckets
+        if let Some(bucket) = buckets
+            .bidirectional
             .iter_mut()
-            .max_by_key(|(bucket, _head)| bucket)
+            .max_by_key(|(bucket, _head)| *bucket)
             .map(|(_bucket, head)| head)
         {
-            if let Some(highest_dd_fas_ix) = bucket.pop(&mut dd_buckets.nodes) {
+            if let Some(highest_dd_fas_ix) = bucket.pop(&mut nodes) {
                 some_moved = true;
-                let highest_dd_node = &dd_buckets.nodes[highest_dd_fas_ix.0];
-                update_connected_node_buckets(highest_dd_node);
-                s_1.push_back(highest_dd_node.graph_ix);
+                buckets
+                    .get_bucket(highest_dd_fas_ix, &mut nodes)
+                    .remove(highest_dd_fas_ix, &mut nodes);
+                buckets.update_neighbour_node_buckets(highest_dd_fas_ix, &mut nodes);
+                s_1.push_back(nodes[highest_dd_fas_ix.0].graph_ix);
             }
         }
 
@@ -218,18 +187,10 @@ fn good_node_sequence(
 }
 
 #[derive(Debug)]
-// TODO: can probably split out this struct's fields in function variables & remove this def
-struct DeltaDegreeBuckets {
-    /// Backing storage for delta degree lists
-    nodes: Vec<FasNode>,
-
-    sinks: LinkedListHead,
+struct Buckets {
+    sinks_or_isolated: LinkedListHead,
     sources: LinkedListHead,
-
-    /// Linked lists for unprocessed graph nodes-so-far, grouped by their current delta degree
-    buckets: HashMap<isize, LinkedListHead>,
-
-    graph_ix_lookup: HashMap<NodeIndex<SeqGraphIx>, FasNodeIndex>,
+    bidirectional: HashMap<isize, LinkedListHead>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -321,6 +282,66 @@ impl LinkedListHead {
 
         if self.start == Some(remove_ix) {
             self.start = ll_entry.next;
+        }
+    }
+}
+
+impl Buckets {
+    /// Returns the bucket that a node should belong to, not the list it's necessarily currently in
+    fn get_bucket(&mut self, ix: FasNodeIndex, nodes: &mut [FasNode]) -> &mut LinkedListHead {
+        let node = &mut nodes[ix.0];
+
+        if node.out_degree == 0 {
+            &mut self.sinks_or_isolated
+        } else if node.in_degree == 0 {
+            &mut self.sources
+        } else {
+            let delta_degree = node.out_degree as isize - node.in_degree as isize;
+            self.bidirectional
+                .entry(delta_degree)
+                .or_insert(Default::default())
+        }
+    }
+
+    fn update_neighbour_node_buckets(&mut self, ix: FasNodeIndex, nodes: &mut [FasNode]) {
+        for i in 0..nodes[ix.0].out_edges.len() {
+            let out_ix = nodes[ix.0].out_edges[i];
+
+            if out_ix == ix {
+                continue;
+            }
+
+            // Ignore nodes which have already been moved to the good sequence
+            if nodes[out_ix.0].ll_entry.is_none() {
+                continue;
+            }
+
+            self.get_bucket(out_ix, nodes).remove(ix, nodes);
+
+            // Other node has lost an in-edge; reduce in-degree by 1
+            nodes[out_ix.0].in_degree -= 1;
+
+            self.get_bucket(out_ix, nodes).push_front(ix, nodes);
+        }
+
+        for i in 0..nodes[ix.0].in_edges.len() {
+            let in_ix = nodes[ix.0].in_edges[i];
+
+            if in_ix == ix {
+                continue;
+            }
+
+            // Ignore nodes which have already been moved to the good sequence
+            if nodes[in_ix.0].ll_entry.is_none() {
+                continue;
+            }
+
+            self.get_bucket(in_ix, nodes).remove(ix, nodes);
+
+            // Other node has lost an out-edge; reduce out-degree by 1
+            nodes[in_ix.0].out_degree -= 1;
+
+            self.get_bucket(in_ix, nodes).push_front(ix, nodes);
         }
     }
 }
