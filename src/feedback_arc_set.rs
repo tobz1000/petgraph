@@ -2,14 +2,10 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::{
     graph::{GraphIndex, NodeIndex},
-    stable_graph::StableDiGraph,
     visit::{EdgeRef, GraphProp, IntoEdgeReferences},
-    Directed, Direction,
+    Directed,
 };
 
-/// Isomorphic to input graph; used in the process of determining a good node sequence from which to
-/// extract a feedback arc set.
-type SeqSourceGraph = StableDiGraph<(), (), SeqGraphIx>;
 type SeqGraphIx = usize;
 
 /// \[Generic\] Finds a [feedback arc set]: a set of edges in the given directed graph, which when
@@ -117,7 +113,7 @@ fn good_node_sequence(
         let to_fas_ix = fas_node_entry(to_g_ix);
 
         nodes[from_fas_ix.0].out_edges.push(to_fas_ix);
-        nodes[to_fas_ix.0].out_edges.push(from_fas_ix);
+        nodes[to_fas_ix.0].in_edges.push(from_fas_ix);
     }
 
     // Set initial in/out-degrees
@@ -227,8 +223,7 @@ struct FasNode {
     /// removed)
     in_degree: usize,
 
-    /// Information about current linked list location. `None` when node is removed from all
-    /// buckets.
+    /// Current linked list location. `None` when node is not in any bucket.
     ll_entry: Option<LinkedListEntry>,
 }
 
@@ -237,10 +232,13 @@ impl LinkedListHead {
         if let Some(start_ix) = self.start {
             let start_node = &mut nodes[start_ix.0];
             start_node.ll_entry.as_mut().unwrap().prev = Some(push_ix);
-
-            let push_node = &mut nodes[push_ix.0];
-            push_node.ll_entry.as_mut().unwrap().next = Some(start_ix);
         }
+
+        let push_node = &mut nodes[push_ix.0];
+        push_node.ll_entry = Some(LinkedListEntry {
+            next: self.start,
+            prev: None,
+        });
 
         self.start = Some(push_ix);
     }
@@ -280,6 +278,7 @@ impl LinkedListHead {
             next_node.ll_entry.as_mut().unwrap().prev = ll_entry.prev;
         }
 
+        // If the removed node was head of the list
         if self.start == Some(remove_ix) {
             self.start = ll_entry.next;
         }
@@ -366,9 +365,9 @@ mod test {
 
         for i in g.node_indices() {
             for j in g.node_indices() {
-                // if i >= j {
-                //     continue;
-                // }
+                if i >= j {
+                    continue;
+                }
 
                 g.add_edge(i, j, ());
             }
