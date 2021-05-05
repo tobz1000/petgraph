@@ -1138,6 +1138,8 @@ quickcheck! {
 
         fas_size <= expected_bound
     }
+
+    // TODO: test multiple edges between nodes, test graphs with loops
 }
 
 fn is_valid_matching<G: NodeIndexable>(m: &Matching<G>) -> bool {
