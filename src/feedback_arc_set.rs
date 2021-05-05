@@ -58,9 +58,8 @@ pub fn greedy_feedback_arc_set<G>(g: G) -> impl Iterator<Item = G::EdgeRef>
 where
     G: IntoEdgeReferences + GraphProp<EdgeType = Directed>,
     G::NodeId: GraphIndex,
+    G: crate::visit::NodeCount,
 {
-    // TODO: remove intermediate stable graph if we don't have to remove from it
-
     // TODO: see if we can support 32-bit graphs now
     let node_seq = good_node_sequence(g.edge_references().map(|e| {
         (
@@ -148,17 +147,16 @@ fn good_node_sequence(
             s_1.push_back(nodes[source_fas_ix.0].graph_ix);
         }
 
-        if let Some(bucket) = buckets
+        if let Some((_bucket, list)) = buckets
             .bidirectional
             .iter_mut()
-            .max_by_key(|(bucket, _head)| *bucket)
-            .map(|(_bucket, head)| head)
+            .filter(|(_bucket, head)| head.start.is_some())
+            .max_by_key(|(bucket, _ix)| *bucket)
         {
-            if let Some(highest_dd_fas_ix) = bucket.pop(&mut nodes) {
-                some_moved = true;
-                buckets.update_neighbour_node_buckets(highest_dd_fas_ix, &mut nodes);
-                s_1.push_back(nodes[highest_dd_fas_ix.0].graph_ix);
-            }
+            let highest_dd_fas_ix = list.pop(&mut nodes).unwrap();
+            some_moved = true;
+            buckets.update_neighbour_node_buckets(highest_dd_fas_ix, &mut nodes);
+            s_1.push_back(nodes[highest_dd_fas_ix.0].graph_ix);
         }
 
         if !some_moved {
@@ -177,6 +175,7 @@ fn good_node_sequence(
 struct Buckets {
     sinks_or_isolated: LinkedListHead,
     sources: LinkedListHead,
+    // TODO: replace with linked list for O(1) highest-value lookup
     bidirectional: HashMap<isize, LinkedListHead>,
 }
 
@@ -235,20 +234,9 @@ impl LinkedListHead {
     }
 
     fn pop(&mut self, nodes: &mut [FasNode]) -> Option<FasNodeIndex> {
-        if let Some(start_ix) = self.start {
-            let start_node = &mut nodes[start_ix.0];
-            let start_ll_entry = start_node.ll_entry.take().unwrap();
-
-            if let Some(next_ix) = start_ll_entry.next {
-                let next_node = &mut nodes[next_ix.0];
-                next_node.ll_entry.as_mut().unwrap().prev = None;
-
-                self.start = Some(next_ix);
-            } else {
-                self.start = None;
-            }
-
-            Some(start_ix)
+        if let Some(remove_ix) = self.start {
+            self.remove(remove_ix, nodes);
+            Some(remove_ix)
         } else {
             None
         }
@@ -256,28 +244,9 @@ impl LinkedListHead {
 
     /// `remove_ix` **must** be a member of the list headed by `self`
     fn remove(&mut self, remove_ix: FasNodeIndex, nodes: &mut [FasNode]) {
-        // Assert that the node to remove is currently in this list
         debug_assert!(
-            {
-                let mut node_ix = self.start;
-
-                loop {
-                    if let Some(n_ix) = node_ix {
-                        if n_ix == remove_ix {
-                            break true;
-                        }
-
-                        node_ix = nodes[n_ix.0]
-                            .ll_entry
-                            .as_ref()
-                            .expect("node in linked list should have `ll_entry` populated")
-                            .next;
-                    } else {
-                        break false;
-                    }
-                }
-            },
-            "expected list to contain node to remove"
+            self.to_vec(nodes).contains(&remove_ix),
+            "node to remove should be member of current linked list"
         );
 
         let remove_node = &mut nodes[remove_ix.0];
@@ -297,6 +266,25 @@ impl LinkedListHead {
         if self.start == Some(remove_ix) {
             self.start = ll_entry.next;
         }
+    }
+
+    /// For debug purposes
+    fn to_vec(&self, nodes: &[FasNode]) -> Vec<FasNodeIndex> {
+        let mut ixs = Vec::new();
+
+        let mut node_ix = self.start;
+
+        while let Some(n_ix) = node_ix {
+            ixs.push(n_ix);
+
+            node_ix = nodes[n_ix.0]
+                .ll_entry
+                .as_ref()
+                .expect("node in linked list should have `ll_entry` populated")
+                .next;
+        }
+
+        ixs
     }
 }
 
@@ -358,43 +346,5 @@ impl Buckets {
 
             self.suitable_bucket(in_ix, nodes).push_front(in_ix, nodes);
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{
-        algo::is_cyclic_directed,
-        graph::{DiGraph, EdgeIndex},
-        visit::EdgeRef,
-    };
-
-    use super::greedy_feedback_arc_set;
-
-    #[test]
-    fn fas_debug() {
-        let mut g = DiGraph::<(), ()>::with_capacity(0, 0);
-
-        for _ in 0..4 {
-            g.add_node(());
-        }
-
-        for i in g.node_indices() {
-            for j in g.node_indices() {
-                if i >= j {
-                    continue;
-                }
-
-                g.add_edge(i, j, ());
-            }
-        }
-
-        let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&g).map(|e| e.id()).collect();
-
-        for edge_id in fas {
-            g.remove_edge(edge_id);
-        }
-
-        assert!(!is_cyclic_directed(&g));
     }
 }
