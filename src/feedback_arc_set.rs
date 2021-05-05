@@ -84,7 +84,7 @@ fn good_node_sequence(
     let mut buckets = Buckets {
         sinks_or_isolated: NodeLinkedList::new(),
         sources: NodeLinkedList::new(),
-        bidirectional: HashMap::new(),
+        bidirectional: LinkedList::new(),
     };
     // Lookup of node indices from input graph to indices into `nodes`
     let mut graph_ix_lookup = HashMap::new();
@@ -152,8 +152,12 @@ fn good_node_sequence(
             s_1.push_back(nodes[source_fas_ix].data().graph_ix);
         }
 
+        if let Some(bucket_ix) = buckets.bidirectional {
+            if let Some(highest_dd_fas_ix) = 
+        }
         if let Some((_bucket, list)) = buckets
             .bidirectional
+            .start
             .iter_mut()
             .filter(|(_bucket, head)| head.start.is_some())
             .max_by_key(|(bucket, _ix)| *bucket)
@@ -202,7 +206,7 @@ struct Buckets {
     sinks_or_isolated: NodeLinkedList,
     sources: NodeLinkedList,
     // TODO: replace with linked list for O(1) highest-value lookup
-    bidirectional: HashMap<isize, NodeLinkedList>,
+    bidirectional: LinkedList<NodeLinkedList, Vec<usize>, usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
