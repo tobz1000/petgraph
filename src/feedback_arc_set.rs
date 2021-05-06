@@ -81,6 +81,7 @@ fn good_node_sequence(
     edge_refs: impl Iterator<Item = (NodeIndex<SeqGraphIx>, NodeIndex<SeqGraphIx>)>,
 ) -> HashMap<SeqGraphIx, usize> {
     let mut nodes = FasNodeContainer { nodes: Vec::new() };
+    let mut bidir_bkts = Vec::new();
     let mut buckets = Buckets {
         sinks_or_isolated: NodeLinkedList::new(),
         sources: NodeLinkedList::new(),
@@ -152,7 +153,7 @@ fn good_node_sequence(
             s_1.push_back(nodes[source_fas_ix].data().graph_ix);
         }
 
-        if let Some(bucket_ix) = buckets.bidirectional {
+        if let Some(bucket_ix) = buckets.bidirectional.start {
             if let Some(highest_dd_fas_ix) = 
         }
         if let Some((_bucket, list)) = buckets
@@ -375,7 +376,7 @@ mod linked_list {
             }
         }
 
-        /// `remove_ix` **must** be a member of the list headed by `self`
+        /// `remove_ix` **must** be a member of `self`
         pub fn remove(&mut self, remove_ix: Ix, container: &mut Container) {
             debug_assert!(
                 self.to_vec(container).contains(&remove_ix),
