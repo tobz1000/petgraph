@@ -92,13 +92,16 @@ fn good_node_sequence(
 
     // Build node entries
     for (from_g_ix, to_g_ix) in edge_refs {
-        let mut fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>| -> ll::Index<FasNode> {
+        let mut fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>,
+                                  fas_stg: &mut ll::Storage<FasNode>|
+         -> ll::Index<FasNode> {
             match graph_ix_lookup.get(&g_ix) {
                 Some(fas_ix) => *fas_ix,
                 None => {
                     let fas_ix = fas_stg.push(FasNode {
                         graph_ix: g_ix,
-                        list_loc: None,
+                        // Assume all nodes are bidirectional while edges still being added
+                        list_loc: Some(FasNodeLocation::Bidirectional(bkt_0_ix)),
                         out_edges: Vec::new(),
                         in_edges: Vec::new(),
                         out_degree: 0,
@@ -112,11 +115,25 @@ fn good_node_sequence(
             }
         };
 
-        let from_fas_ix = fas_node_entry(from_g_ix);
-        let to_fas_ix = fas_node_entry(to_g_ix);
+        let from_fas_ix = fas_node_entry(from_g_ix, &mut fas_stg);
+        let from_node = fas_stg[from_fas_ix].data();
+        from_node.out_degree += 1;
+        buckets.move_to_adjacent_bucket(
+            from_fas_ix,
+            &mut fas_stg,
+            &mut bkt_stg,
+            DeltaChange::PlusOne,
+        );
 
-        fas_stg[from_fas_ix].data().out_edges.push(to_fas_ix);
-        fas_stg[to_fas_ix].data().in_edges.push(from_fas_ix);
+        let to_fas_ix = fas_node_entry(to_g_ix, &mut fas_stg);
+        let to_node = fas_stg[to_fas_ix].data();
+        to_node.in_degree += 1;
+        buckets.move_to_adjacent_bucket(
+            to_fas_ix,
+            &mut fas_stg,
+            &mut bkt_stg,
+            DeltaChange::MinusOne,
+        );
     }
 
     let mut s_1 = VecDeque::new();
@@ -137,12 +154,17 @@ fn good_node_sequence(
             s_1.push_back(fas_stg[source_fas_ix].data().graph_ix);
         }
 
-        if let Some(highest_dd_bucket) = buckets.highest_bidirectional(&mut fas_stg, &mut bkt_stg) {
-            if let Some(highest_dd_ix) = highest_dd_bucket.get().pop(&mut fas_stg) {
-                some_moved = true;
-                buckets.update_neighbour_node_buckets(highest_dd_ix, &mut fas_stg, &mut bkt_stg);
-                s_1.push_back(fas_stg[highest_dd_ix].data().graph_ix);
-            }
+        let highest_dd_ix =
+            if let Some(mut highest_dd_bucket) = buckets.highest_bidirectional(&mut bkt_stg) {
+                highest_dd_bucket.get().pop(&mut fas_stg)
+            } else {
+                None
+            };
+
+        if let Some(highest_dd_ix) = highest_dd_ix {
+            some_moved = true;
+            buckets.update_neighbour_node_buckets(highest_dd_ix, &mut fas_stg, &mut bkt_stg);
+            s_1.push_back(fas_stg[highest_dd_ix].data().graph_ix);
         }
 
         if !some_moved {
@@ -226,6 +248,13 @@ struct BucketHandle<'a> {
     bkt_ix: ll::Index<BucketNode>,
 }
 
+/// Represents a change in a FAS node's degree-delta when constructing or removing nodes from
+/// buckets.
+enum DeltaChange {
+    PlusOne,
+    MinusOne,
+}
+
 impl<'a> BucketHandle<'a> {
     fn get<'b>(&'b mut self) -> &'b mut LinkedList<FasNode> {
         let BucketHandle {
@@ -234,45 +263,30 @@ impl<'a> BucketHandle<'a> {
         &mut bkt_stg[*bkt_ix].data().list
     }
 
-    /// Gets a handle for the bucket for 1-lower delta degree, allocating and adding to bucket list
-    /// if necessary.
-    fn decrement_bucket(self) -> BucketHandle<'a> {
+    /// Gets a handle for an adjacent bucket, allocating and adding to bucket list if necessary.
+    fn adjacent_bucket(self, change: DeltaChange) -> BucketHandle<'a> {
         let BucketHandle {
             bkt_stg,
             bkt_ix,
             bkts_list,
         } = self;
         let bkt = bkt_stg[bkt_ix].data();
-        let prev_dd = bkt.delta_degree - 1;
-        let prev_ix = Buckets::bucket_index(prev_dd, bkt_stg);
-        let bkt_entry = &mut bkt_stg[bkt_ix];
-
-        if !bkt_entry.is_in_list() {
-            bkts_list.insert_after(prev_ix, bkt_ix, bkt_stg);
-        }
-
-        BucketHandle {
-            bkt_stg,
-            bkts_list,
-            bkt_ix: prev_ix,
-        }
-    }
-
-    /// Gets a handle for the bucket for 1-higher delta degree, allocating and adding to bucket list
-    /// if necessary.
-    fn increment_bucket(self) -> BucketHandle<'a> {
-        let BucketHandle {
-            bkt_stg,
-            bkt_ix,
-            bkts_list,
-        } = self;
-        let bkt = bkt_stg[bkt_ix].data();
-        let next_dd = bkt.delta_degree + 1;
+        let next_dd = match change {
+            DeltaChange::PlusOne => bkt.delta_degree + 1,
+            DeltaChange::MinusOne => bkt.delta_degree - 1,
+        };
         let next_ix = Buckets::bucket_index(next_dd, bkt_stg);
         let bkt_entry = &mut bkt_stg[bkt_ix];
 
         if !bkt_entry.is_in_list() {
-            bkts_list.insert_before(next_ix, bkt_ix, bkt_stg);
+            match change {
+                DeltaChange::PlusOne => {
+                    bkts_list.insert_before(next_ix, bkt_ix, bkt_stg);
+                }
+                DeltaChange::MinusOne => {
+                    bkts_list.insert_after(next_ix, bkt_ix, bkt_stg);
+                }
+            }
         }
 
         BucketHandle {
@@ -321,7 +335,6 @@ impl Buckets {
 
     fn highest_bidirectional<'a>(
         &'a mut self,
-        fas_stg: &mut ll::Storage<FasNode>,
         bkt_stg: &'a mut ll::Storage<BucketNode>,
     ) -> Option<BucketHandle<'a>> {
         if let Some(highest_bucket) = self.bidirectional.start {
@@ -353,6 +366,40 @@ impl Buckets {
         }
     }
 
+    fn move_to_adjacent_bucket(
+        &mut self,
+        fas_node_ix: ll::Index<FasNode>,
+        fas_stg: &mut ll::Storage<FasNode>,
+        bkt_stg: &mut ll::Storage<BucketNode>,
+        change: DeltaChange,
+    ) {
+        let fas_node = fas_stg[fas_node_ix].data();
+        let dest_pos = fas_node.suitable_bucket(bkt_stg);
+
+        let mut curr_bkt = self.bidirectional_bucket_handle(fas_node_ix, fas_stg, bkt_stg);
+        let mut adjacent_bkt;
+
+        // Remove from current bucket
+        curr_bkt.get().remove(fas_node_ix, fas_stg);
+
+        let dest_bkt = match dest_pos {
+            FasNodeLocation::SinksOrIsolated => {
+                drop(curr_bkt);
+                &mut self.sinks_or_isolated
+            }
+            FasNodeLocation::Sources => {
+                drop(curr_bkt);
+                &mut self.sources
+            }
+            FasNodeLocation::Bidirectional(_) => {
+                adjacent_bkt = curr_bkt.adjacent_bucket(change);
+                adjacent_bkt.get()
+            }
+        };
+
+        dest_bkt.push(fas_node_ix, fas_stg);
+    }
+
     fn update_neighbour_node_buckets(
         &mut self,
         ix: ll::Index<FasNode>,
@@ -374,23 +421,10 @@ impl Buckets {
                 continue;
             }
 
-            let curr_bkt = self.bidirectional_bucket_handle(out_ix, fas_stg, bkt_stg);
-
-            // Remove from current bucket
-            curr_bkt.get().remove(out_ix, fas_stg);
-
             // Other node has lost an in-edge; reduce in-degree by 1
             let out_node = fas_stg[out_ix].data();
             out_node.in_degree -= 1;
-
-            let dest_pos = out_node.suitable_bucket(bkt_stg);
-            let dest_bkt = match dest_pos {
-                FasNodeLocation::SinksOrIsolated => &mut self.sinks_or_isolated,
-                FasNodeLocation::Sources => &mut self.sources,
-                FasNodeLocation::Bidirectional(_) => curr_bkt.increment_bucket().get(),
-            };
-
-            dest_bkt.push(out_ix, fas_stg);
+            self.move_to_adjacent_bucket(out_ix, fas_stg, bkt_stg, DeltaChange::PlusOne);
         }
 
         let in_edge_count = fas_stg[ix].data().in_edges.len();
@@ -406,21 +440,10 @@ impl Buckets {
                 continue;
             }
 
-            let curr_bkt = self.bidirectional_bucket_handle(in_ix, fas_stg, bkt_stg);
-            curr_bkt.get().remove(in_ix, fas_stg);
-
             // Other node has lost an out-edge; reduce out-degree by 1
             let in_node = fas_stg[in_ix].data();
             in_node.out_degree -= 1;
-
-            let dest_pos = in_node.suitable_bucket(bkt_stg);
-            let dest_bkt = match dest_pos {
-                FasNodeLocation::SinksOrIsolated => &mut self.sinks_or_isolated,
-                FasNodeLocation::Sources => &mut self.sources,
-                FasNodeLocation::Bidirectional(_) => curr_bkt.decrement_bucket().get(),
-            };
-
-            dest_bkt.push(in_ix, fas_stg);
+            self.move_to_adjacent_bucket(in_ix, fas_stg, bkt_stg, DeltaChange::MinusOne);
         }
     }
 }
