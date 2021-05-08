@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    ops::{Index, IndexMut},
-};
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     graph::{GraphIndex, NodeIndex},
@@ -9,7 +6,8 @@ use crate::{
     Directed,
 };
 
-use self::linked_list::{LinkedList, LinkedListEntry};
+use self::linked_list as ll;
+use self::linked_list::LinkedList;
 
 // TODO: see if we can support 32-bit graphs now
 type SeqGraphIx = usize;
@@ -80,31 +78,32 @@ where
 fn good_node_sequence(
     edge_refs: impl Iterator<Item = (NodeIndex<SeqGraphIx>, NodeIndex<SeqGraphIx>)>,
 ) -> HashMap<SeqGraphIx, usize> {
-    let mut nodes = FasNodeContainer { nodes: Vec::new() };
-    let mut bidir_bkts = Vec::new();
+    let mut fas_stg = ll::Storage::new();
+    let mut bkt_stg = ll::Storage::new();
     let mut buckets = Buckets {
-        sinks_or_isolated: NodeLinkedList::new(),
-        sources: NodeLinkedList::new(),
+        sinks_or_isolated: LinkedList::new(),
+        sources: LinkedList::new(),
         bidirectional: LinkedList::new(),
     };
     // Lookup of node indices from input graph to indices into `nodes`
     let mut graph_ix_lookup = HashMap::new();
 
+    let bkt_0_ix = Buckets::bucket_index(0, &mut bkt_stg);
+
     // Build node entries
     for (from_g_ix, to_g_ix) in edge_refs {
-        let mut fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>| -> FasNodeIndex {
+        let mut fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>| -> ll::Index<FasNode> {
             match graph_ix_lookup.get(&g_ix) {
                 Some(fas_ix) => *fas_ix,
                 None => {
-                    let fas_ix = FasNodeIndex(nodes.nodes.len());
-
-                    nodes.nodes.push(LinkedListEntry::new(FasNode {
+                    let fas_ix = fas_stg.push(FasNode {
                         graph_ix: g_ix,
+                        list_loc: None,
                         out_edges: Vec::new(),
                         in_edges: Vec::new(),
                         out_degree: 0,
                         in_degree: 0,
-                    }));
+                    });
 
                     graph_ix_lookup.insert(g_ix, fas_ix);
 
@@ -116,23 +115,8 @@ fn good_node_sequence(
         let from_fas_ix = fas_node_entry(from_g_ix);
         let to_fas_ix = fas_node_entry(to_g_ix);
 
-        nodes[from_fas_ix].data().out_edges.push(to_fas_ix);
-        nodes[to_fas_ix].data().in_edges.push(from_fas_ix);
-    }
-
-    // Set initial in/out-degrees
-    for entry in nodes.nodes.iter_mut() {
-        let node = entry.data();
-        node.out_degree = node.out_edges.len();
-        node.in_degree = node.in_edges.len();
-    }
-
-    // Add nodes to initial lists
-    for i in 0..nodes.nodes.len() {
-        let fas_ix = FasNodeIndex(i);
-        buckets
-            .suitable_bucket(fas_ix, &mut nodes)
-            .push_front(fas_ix, &mut nodes);
+        fas_stg[from_fas_ix].data().out_edges.push(to_fas_ix);
+        fas_stg[to_fas_ix].data().in_edges.push(from_fas_ix);
     }
 
     let mut s_1 = VecDeque::new();
@@ -141,32 +125,24 @@ fn good_node_sequence(
     loop {
         let mut some_moved = false;
 
-        while let Some(sink_fas_ix) = buckets.sinks_or_isolated.pop(&mut nodes) {
+        while let Some(sink_fas_ix) = buckets.sinks_or_isolated.pop(&mut fas_stg) {
             some_moved = true;
-            buckets.update_neighbour_node_buckets(sink_fas_ix, &mut nodes);
-            s_2.push_front(nodes[sink_fas_ix].data().graph_ix);
+            buckets.update_neighbour_node_buckets(sink_fas_ix, &mut fas_stg, &mut bkt_stg);
+            s_2.push_front(fas_stg[sink_fas_ix].data().graph_ix);
         }
 
-        while let Some(source_fas_ix) = buckets.sources.pop(&mut nodes) {
+        while let Some(source_fas_ix) = buckets.sources.pop(&mut fas_stg) {
             some_moved = true;
-            buckets.update_neighbour_node_buckets(source_fas_ix, &mut nodes);
-            s_1.push_back(nodes[source_fas_ix].data().graph_ix);
+            buckets.update_neighbour_node_buckets(source_fas_ix, &mut fas_stg, &mut bkt_stg);
+            s_1.push_back(fas_stg[source_fas_ix].data().graph_ix);
         }
 
-        if let Some(bucket_ix) = buckets.bidirectional.start {
-            if let Some(highest_dd_fas_ix) = 
-        }
-        if let Some((_bucket, list)) = buckets
-            .bidirectional
-            .start
-            .iter_mut()
-            .filter(|(_bucket, head)| head.start.is_some())
-            .max_by_key(|(bucket, _ix)| *bucket)
-        {
-            let highest_dd_fas_ix = list.pop(&mut nodes).unwrap();
-            some_moved = true;
-            buckets.update_neighbour_node_buckets(highest_dd_fas_ix, &mut nodes);
-            s_1.push_back(nodes[highest_dd_fas_ix].data().graph_ix);
+        if let Some(highest_dd_bucket) = buckets.highest_bidirectional(&mut fas_stg, &mut bkt_stg) {
+            if let Some(highest_dd_ix) = highest_dd_bucket.get().pop(&mut fas_stg) {
+                some_moved = true;
+                buckets.update_neighbour_node_buckets(highest_dd_ix, &mut fas_stg, &mut bkt_stg);
+                s_1.push_back(fas_stg[highest_dd_ix].data().graph_ix);
+            }
         }
 
         if !some_moved {
@@ -181,49 +157,20 @@ fn good_node_sequence(
         .collect()
 }
 
-type NodeLinkedList = LinkedList<FasNode, FasNodeContainer, FasNodeIndex>;
-
-#[derive(Debug)]
-struct FasNodeContainer {
-    nodes: Vec<LinkedListEntry<FasNode, FasNodeIndex>>,
-}
-
-impl Index<FasNodeIndex> for FasNodeContainer {
-    type Output = LinkedListEntry<FasNode, FasNodeIndex>;
-
-    fn index(&self, index: FasNodeIndex) -> &Self::Output {
-        &self.nodes[index.0]
-    }
-}
-
-impl IndexMut<FasNodeIndex> for FasNodeContainer {
-    fn index_mut(&mut self, index: FasNodeIndex) -> &mut Self::Output {
-        &mut self.nodes[index.0]
-    }
-}
-
-#[derive(Debug)]
-struct Buckets {
-    sinks_or_isolated: NodeLinkedList,
-    sources: NodeLinkedList,
-    // TODO: replace with linked list for O(1) highest-value lookup
-    bidirectional: LinkedList<NodeLinkedList, Vec<usize>, usize>,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct FasNodeIndex(usize);
-
 /// Represents a node from the input graph, tracking its current delta degree
 #[derive(Debug)]
 struct FasNode {
     /// Node index in input graph.
     graph_ix: NodeIndex<SeqGraphIx>,
 
+    /// `None` if not currently in a list
+    list_loc: Option<FasNodeLocation>,
+
     /// All outward edges from this node (not removed during processing)
-    out_edges: Vec<FasNodeIndex>,
+    out_edges: Vec<ll::Index<FasNode>>,
 
     /// All inward edges from this node (not removed during processing)
-    in_edges: Vec<FasNodeIndex>,
+    in_edges: Vec<ll::Index<FasNode>>,
 
     /// Current out-degree of this node (decremented during processing as connected nodes are
     /// removed)
@@ -234,95 +181,356 @@ struct FasNode {
     in_degree: usize,
 }
 
-impl Buckets {
-    /// Returns the bucket that a node should belong to, not the list it's necessarily currently in
-    fn suitable_bucket(
-        &mut self,
-        ix: FasNodeIndex,
-        nodes: &mut FasNodeContainer,
-    ) -> &mut NodeLinkedList {
-        let node = nodes[ix].data();
-
-        if node.out_degree == 0 {
-            &mut self.sinks_or_isolated
-        } else if node.in_degree == 0 {
-            &mut self.sources
+impl FasNode {
+    fn suitable_bucket(&self, bkt_stg: &mut ll::Storage<BucketNode>) -> FasNodeLocation {
+        if self.out_degree == 0 {
+            FasNodeLocation::SinksOrIsolated
+        } else if self.in_degree == 0 {
+            FasNodeLocation::Sources
         } else {
-            let delta_degree = node.out_degree as isize - node.in_degree as isize;
-            self.bidirectional
-                .entry(delta_degree)
-                .or_insert(LinkedList::new())
+            let delta_degree = self.out_degree as isize - self.in_degree as isize;
+            let bkt_ix = Buckets::bucket_index(delta_degree, bkt_stg);
+            FasNodeLocation::Bidirectional(bkt_ix)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FasNodeLocation {
+    SinksOrIsolated,
+    Sources,
+    Bidirectional(ll::Index<BucketNode>),
+}
+
+#[derive(Debug)]
+struct BucketNode {
+    delta_degree: isize,
+    list: LinkedList<FasNode>,
+}
+
+#[derive(Debug)]
+struct Buckets {
+    sinks_or_isolated: LinkedList<FasNode>,
+    sources: LinkedList<FasNode>,
+
+    /// Meta-list of lists (buckets) of FAS nodes, organised by delta degree, descending order. Only
+    /// populated buckets should reside in this list.
+    bidirectional: LinkedList<BucketNode>,
+}
+
+/// Proxy for a [`LinkedList<FasNode>`] which, if the list is non-permanent and ends up empty,
+/// removes the list from the bucket meta-list on drop.
+struct BucketHandle<'a> {
+    bkt_stg: &'a mut ll::Storage<BucketNode>,
+    bkts_list: &'a mut LinkedList<BucketNode>,
+    bkt_ix: ll::Index<BucketNode>,
+}
+
+impl<'a> BucketHandle<'a> {
+    fn get<'b>(&'b mut self) -> &'b mut LinkedList<FasNode> {
+        let BucketHandle {
+            bkt_stg, bkt_ix, ..
+        } = self;
+        &mut bkt_stg[*bkt_ix].data().list
+    }
+
+    /// Gets a handle for the bucket for 1-lower delta degree, allocating and adding to bucket list
+    /// if necessary.
+    fn decrement_bucket(self) -> BucketHandle<'a> {
+        let BucketHandle {
+            bkt_stg,
+            bkt_ix,
+            bkts_list,
+        } = self;
+        let bkt = bkt_stg[bkt_ix].data();
+        let prev_dd = bkt.delta_degree - 1;
+        let prev_ix = Buckets::bucket_index(prev_dd, bkt_stg);
+        let bkt_entry = &mut bkt_stg[bkt_ix];
+
+        if !bkt_entry.is_in_list() {
+            bkts_list.insert_after(prev_ix, bkt_ix, bkt_stg);
+        }
+
+        BucketHandle {
+            bkt_stg,
+            bkts_list,
+            bkt_ix: prev_ix,
         }
     }
 
-    fn update_neighbour_node_buckets(&mut self, ix: FasNodeIndex, nodes: &mut FasNodeContainer) {
-        for i in 0..nodes[ix].data().out_edges.len() {
-            let out_ix = nodes[ix].data().out_edges[i];
+    /// Gets a handle for the bucket for 1-higher delta degree, allocating and adding to bucket list
+    /// if necessary.
+    fn increment_bucket(self) -> BucketHandle<'a> {
+        let BucketHandle {
+            bkt_stg,
+            bkt_ix,
+            bkts_list,
+        } = self;
+        let bkt = bkt_stg[bkt_ix].data();
+        let next_dd = bkt.delta_degree + 1;
+        let next_ix = Buckets::bucket_index(next_dd, bkt_stg);
+        let bkt_entry = &mut bkt_stg[bkt_ix];
 
+        if !bkt_entry.is_in_list() {
+            bkts_list.insert_before(next_ix, bkt_ix, bkt_stg);
+        }
+
+        BucketHandle {
+            bkt_stg,
+            bkts_list,
+            bkt_ix: next_ix,
+        }
+    }
+}
+
+impl<'bkts> Drop for BucketHandle<'bkts> {
+    fn drop(&mut self) {
+        let BucketHandle {
+            bkt_stg,
+            bkts_list,
+            bkt_ix,
+        } = self;
+        let bkt_node = bkt_stg[*bkt_ix].data();
+        if bkt_node.list.start.is_none() {
+            bkts_list.remove(*bkt_ix, bkt_stg);
+        }
+    }
+}
+
+impl Buckets {
+    /// Deterministic gets the storage index for the bucket of a given delta degree. Extends storage with empty buckets
+    /// if necessary.
+    fn bucket_index(
+        delta_degree: isize,
+        bkt_stg: &mut ll::Storage<BucketNode>,
+    ) -> ll::Index<BucketNode> {
+        // Buckets stored by delta degree in positions [0, -1, 1, -2, 2, ...]
+        let dd_to_ix = |dd| (isize::abs(dd * 2) - (if dd < 0 { 1 } else { 0 })) as usize;
+        let ix_to_dd = |ix| (ix / 2) as isize * (if ix % 2 == 0 { 0 } else { -1 });
+        let stg_pos = dd_to_ix(delta_degree);
+
+        while bkt_stg.len() <= stg_pos {
+            bkt_stg.push(BucketNode {
+                delta_degree: ix_to_dd(bkt_stg.len()),
+                list: LinkedList::new(),
+            });
+        }
+
+        ll::Index::new(stg_pos)
+    }
+
+    fn highest_bidirectional<'a>(
+        &'a mut self,
+        fas_stg: &mut ll::Storage<FasNode>,
+        bkt_stg: &'a mut ll::Storage<BucketNode>,
+    ) -> Option<BucketHandle<'a>> {
+        if let Some(highest_bucket) = self.bidirectional.start {
+            Some(BucketHandle {
+                bkt_stg,
+                bkts_list: &mut self.bidirectional,
+                bkt_ix: highest_bucket,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn bidirectional_bucket_handle<'a>(
+        &'a mut self,
+        fas_ix: ll::Index<FasNode>,
+        fas_stg: &mut ll::Storage<FasNode>,
+        bkt_stg: &'a mut ll::Storage<BucketNode>,
+    ) -> BucketHandle<'a> {
+        let fas_node = &fas_stg[fas_ix].data();
+        if let Some(FasNodeLocation::Bidirectional(bkt_ix)) = fas_node.list_loc {
+            BucketHandle {
+                bkt_stg,
+                bkts_list: &mut self.bidirectional,
+                bkt_ix,
+            }
+        } else {
+            panic!("node not in bidirectional buckets")
+        }
+    }
+
+    fn update_neighbour_node_buckets(
+        &mut self,
+        ix: ll::Index<FasNode>,
+        fas_stg: &mut ll::Storage<FasNode>,
+        bkt_stg: &mut ll::Storage<BucketNode>,
+    ) {
+        let out_edge_count = 0..fas_stg[ix].data().out_edges.len();
+
+        for i in out_edge_count {
+            let out_ix = fas_stg[ix].data().out_edges[i];
+
+            // Ignore loops
             if out_ix == ix {
                 continue;
             }
 
             // Ignore nodes which have already been moved to the good sequence
-            if !nodes[out_ix].is_in_list() {
+            if !fas_stg[out_ix].is_in_list() {
                 continue;
             }
 
-            self.suitable_bucket(out_ix, nodes).remove(out_ix, nodes);
+            let curr_bkt = self.bidirectional_bucket_handle(out_ix, fas_stg, bkt_stg);
+
+            // Remove from current bucket
+            curr_bkt.get().remove(out_ix, fas_stg);
 
             // Other node has lost an in-edge; reduce in-degree by 1
-            nodes[out_ix].data().in_degree -= 1;
+            let out_node = fas_stg[out_ix].data();
+            out_node.in_degree -= 1;
 
-            self.suitable_bucket(out_ix, nodes)
-                .push_front(out_ix, nodes);
+            let dest_pos = out_node.suitable_bucket(bkt_stg);
+            let dest_bkt = match dest_pos {
+                FasNodeLocation::SinksOrIsolated => &mut self.sinks_or_isolated,
+                FasNodeLocation::Sources => &mut self.sources,
+                FasNodeLocation::Bidirectional(_) => curr_bkt.increment_bucket().get(),
+            };
+
+            dest_bkt.push(out_ix, fas_stg);
         }
 
-        for i in 0..nodes[ix].data().in_edges.len() {
-            let in_ix = nodes[ix].data().in_edges[i];
+        let in_edge_count = fas_stg[ix].data().in_edges.len();
+
+        for i in 0..in_edge_count {
+            let in_ix = fas_stg[ix].data().out_edges[i];
 
             if in_ix == ix {
                 continue;
             }
 
-            // Ignore nodes which have already been moved to the good sequence
-            if !nodes[in_ix].is_in_list() {
+            if !fas_stg[in_ix].is_in_list() {
                 continue;
             }
 
-            self.suitable_bucket(in_ix, nodes).remove(in_ix, nodes);
+            let curr_bkt = self.bidirectional_bucket_handle(in_ix, fas_stg, bkt_stg);
+            curr_bkt.get().remove(in_ix, fas_stg);
 
             // Other node has lost an out-edge; reduce out-degree by 1
-            nodes[in_ix].data().out_degree -= 1;
+            let in_node = fas_stg[in_ix].data();
+            in_node.out_degree -= 1;
 
-            self.suitable_bucket(in_ix, nodes).push_front(in_ix, nodes);
+            let dest_pos = in_node.suitable_bucket(bkt_stg);
+            let dest_bkt = match dest_pos {
+                FasNodeLocation::SinksOrIsolated => &mut self.sinks_or_isolated,
+                FasNodeLocation::Sources => &mut self.sources,
+                FasNodeLocation::Bidirectional(_) => curr_bkt.decrement_bucket().get(),
+            };
+
+            dest_bkt.push(in_ix, fas_stg);
         }
     }
 }
 
 mod linked_list {
-    use std::{marker::PhantomData, ops::IndexMut};
+    use std::marker::PhantomData;
+
+    #[derive(Debug)]
+    pub struct Index<Data> {
+        val: usize,
+        marker: PhantomData<Data>,
+    }
+
+    impl<Data> Index<Data> {
+        pub fn new(val: usize) -> Self {
+            Index {
+                val,
+                marker: PhantomData,
+            }
+        }
+    }
+
+    impl<Data> std::cmp::PartialEq for Index<Data> {
+        fn eq(&self, other: &Self) -> bool {
+            self.val.eq(&other.val)
+        }
+    }
+
+    impl<Data> Clone for Index<Data> {
+        fn clone(&self) -> Self {
+            Index {
+                val: self.val,
+                marker: PhantomData,
+            }
+        }
+    }
+
+    impl<Data> Copy for Index<Data> {}
+
+    pub struct Storage<Data> {
+        entries: Vec<Entry<Data>>,
+    }
+
+    impl<Data> Storage<Data> {
+        pub fn new() -> Self {
+            Storage {
+                entries: Vec::new(),
+            }
+        }
+
+        pub fn push(&mut self, data: Data) -> Index<Data> {
+            let ix = Index::new(self.entries.len());
+            self.entries.push(Entry::new(data));
+            ix
+        }
+
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+    }
+
+    impl<Data> std::ops::Index<Index<Data>> for Storage<Data> {
+        type Output = Entry<Data>;
+
+        fn index(&self, ix: Index<Data>) -> &Self::Output {
+            &self.entries[ix.val]
+        }
+    }
+
+    impl<Data> std::ops::IndexMut<Index<Data>> for Storage<Data> {
+        fn index_mut(&mut self, ix: Index<Data>) -> &mut Self::Output {
+            &mut self.entries[ix.val]
+        }
+    }
 
     #[derive(PartialEq, Debug)]
-    pub struct LinkedList<Data, Container, Ix> {
-        pub start: Option<Ix>,
-        marker: PhantomData<(Data, Container)>,
+    pub struct LinkedList<Data> {
+        pub start: Option<Index<Data>>,
     }
 
     #[derive(Debug)]
-    pub struct LinkedListEntry<Data, Ix> {
-        pos: Option<LinkedListPosition<Ix>>,
+    struct Position<Data> {
+        prev: Option<Index<Data>>,
+        next: Option<Index<Data>>,
+    }
+
+    /// Wrapper of payload data stored in [`Storage`].
+    #[derive(Debug)]
+    pub struct Entry<Data> {
+        /// `None` when not a member of any list
+        pos: Option<Position<Data>>,
         data: Data,
     }
-
-    #[derive(Debug)]
-    struct LinkedListPosition<Ix> {
-        prev: Option<Ix>,
-        next: Option<Ix>,
-    }
-
-    impl<Data, Ix> LinkedListEntry<Data, Ix> {
+    impl<Data> Entry<Data> {
         pub fn new(data: Data) -> Self {
-            LinkedListEntry { pos: None, data }
+            Entry { pos: None, data }
+        }
+
+        pub fn next(&self) -> Option<Index<Data>> {
+            self.pos
+                .as_ref()
+                .expect("expected linked list entry to have populated position")
+                .next
+        }
+
+        pub fn prev(&self) -> Option<Index<Data>> {
+            self.pos
+                .as_ref()
+                .expect("expected linked list entry to have populated position")
+                .prev
         }
 
         pub fn data(&mut self) -> &mut Data {
@@ -333,33 +541,29 @@ mod linked_list {
             self.pos.is_some()
         }
 
-        fn pos_mut(&mut self) -> &mut LinkedListPosition<Ix> {
+        fn pos_mut(&mut self) -> &mut Position<Data> {
             self.pos
                 .as_mut()
                 .expect("expected linked list entry to have populated position")
         }
     }
 
-    impl<Data, Container, Ix> LinkedList<Data, Container, Ix>
-    where
-        Container: IndexMut<Ix, Output = LinkedListEntry<Data, Ix>>,
-        Ix: PartialEq + Copy,
-    {
+    impl<Data> LinkedList<Data> {
         pub fn new() -> Self {
-            LinkedList {
-                start: None,
-                marker: PhantomData,
-            }
+            LinkedList { start: None }
         }
 
-        pub fn push_front(&mut self, push_ix: Ix, container: &mut Container) {
+        pub fn push(&mut self, push_ix: Index<Data>, stg: &mut Storage<Data>) {
             if let Some(start_ix) = self.start {
-                let entry = &mut container[start_ix];
+                let entry = &mut stg[start_ix];
                 entry.pos_mut().prev = Some(push_ix);
             }
 
-            let push_entry = &mut container[push_ix];
-            push_entry.pos = Some(LinkedListPosition {
+            let push_entry = &mut stg[push_ix];
+
+            debug_assert!(push_entry.pos.is_none());
+
+            push_entry.pos = Some(Position {
                 next: self.start,
                 prev: None,
             });
@@ -367,32 +571,90 @@ mod linked_list {
             self.start = Some(push_ix);
         }
 
-        pub fn pop(&mut self, container: &mut Container) -> Option<Ix> {
+        pub fn pop(&mut self, stg: &mut Storage<Data>) -> Option<Index<Data>> {
             if let Some(remove_ix) = self.start {
-                self.remove(remove_ix, container);
+                self.remove(remove_ix, stg);
                 Some(remove_ix)
             } else {
                 None
             }
         }
 
+        /// `insert_ix` and `after_ix `should members of `self`
+        pub fn insert_after(
+            &mut self,
+            insert_ix: Index<Data>,
+            after_ix: Index<Data>,
+            stg: &mut Storage<Data>,
+        ) {
+            let after_entry = &mut stg[after_ix];
+
+            debug_assert!(after_entry.pos.is_some());
+
+            after_entry.pos_mut().next = Some(insert_ix);
+
+            let next_ix = after_entry.next();
+
+            if let Some(next_ix) = next_ix {
+                let next_entry = &mut stg[next_ix];
+                next_entry.pos_mut().prev = Some(insert_ix);
+            }
+
+            let insert_entry = &mut stg[insert_ix];
+            debug_assert!(insert_entry.pos.is_none());
+
+            insert_entry.pos = Some(Position {
+                prev: Some(after_ix),
+                next: next_ix,
+            })
+        }
+
+        /// `insert_ix` and `before_ix` **must** members of `self
+        pub fn insert_before(
+            &mut self,
+            insert_ix: Index<Data>,
+            before_ix: Index<Data>,
+            stg: &mut Storage<Data>,
+        ) {
+            let before_entry = &mut stg[before_ix];
+
+            debug_assert!(before_entry.pos.is_some());
+
+            before_entry.pos_mut().next = Some(insert_ix);
+
+            let prev_ix = before_entry.next();
+
+            if let Some(prev_ix) = prev_ix {
+                let prev_entry = &mut stg[prev_ix];
+                prev_entry.pos_mut().next = Some(insert_ix);
+            }
+
+            let insert_entry = &mut stg[insert_ix];
+            debug_assert!(insert_entry.pos.is_none());
+
+            insert_entry.pos = Some(Position {
+                prev: prev_ix,
+                next: Some(before_ix),
+            })
+        }
+
         /// `remove_ix` **must** be a member of `self`
-        pub fn remove(&mut self, remove_ix: Ix, container: &mut Container) {
+        pub fn remove(&mut self, remove_ix: Index<Data>, stg: &mut Storage<Data>) {
             debug_assert!(
-                self.to_vec(container).contains(&remove_ix),
+                self.to_vec(stg).contains(&remove_ix),
                 "node to remove should be member of current linked list"
             );
 
-            let remove_entry = &mut container[remove_ix];
+            let remove_entry = &mut stg[remove_ix];
             let ll_entry = remove_entry.pos.take().unwrap();
 
             if let Some(prev_ix) = ll_entry.prev {
-                let prev_node = &mut container[prev_ix];
+                let prev_node = &mut stg[prev_ix];
                 prev_node.pos_mut().next = ll_entry.next;
             }
 
             if let Some(next_ix) = ll_entry.next {
-                let next_node = &mut container[next_ix];
+                let next_node = &mut stg[next_ix];
                 next_node.pos_mut().prev = ll_entry.prev;
             }
 
@@ -403,7 +665,7 @@ mod linked_list {
         }
 
         /// For debug purposes
-        fn to_vec(&self, container: &mut Container) -> Vec<Ix> {
+        fn to_vec(&self, stg: &mut Storage<Data>) -> Vec<Index<Data>> {
             let mut ixs = Vec::new();
 
             let mut node_ix = self.start;
@@ -411,7 +673,7 @@ mod linked_list {
             while let Some(n_ix) = node_ix {
                 ixs.push(n_ix);
 
-                node_ix = container[n_ix].pos_mut().next;
+                node_ix = stg[n_ix].pos_mut().next;
             }
 
             ixs
