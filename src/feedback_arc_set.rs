@@ -11,9 +11,6 @@ use crate::{
 
 use self::linked_list::{LinkedList, LinkedListEntry};
 
-// TODO: see if we can support 32-bit graphs now
-type SeqGraphIx = usize;
-
 /// \[Generic\] Finds a [feedback arc set]: a set of edges in the given directed graph, which when
 /// removed, make the graph acyclic.
 ///
@@ -68,7 +65,6 @@ where
 {
     let node_seq = good_node_sequence(g.edge_references().map(|e| {
         (
-            // TODO: can we avoid this unwrapping/re-wrapping?
             NodeIndex::new(e.source().index()),
             NodeIndex::new(e.target().index()),
         )
@@ -79,8 +75,8 @@ where
 }
 
 fn good_node_sequence(
-    edge_refs: impl Iterator<Item = (NodeIndex<SeqGraphIx>, NodeIndex<SeqGraphIx>)>,
-) -> HashMap<SeqGraphIx, usize> {
+    edge_refs: impl Iterator<Item = (NodeIndex<usize>, NodeIndex<usize>)>,
+) -> HashMap<usize, usize> {
     let mut nodes = FasNodeContainer { nodes: Vec::new() };
     let mut buckets = Buckets {
         sinks_or_isolated: NodeLinkedList::new(),
@@ -93,7 +89,7 @@ fn good_node_sequence(
 
     // Build node entries
     for (from_g_ix, to_g_ix) in edge_refs {
-        let mut fas_node_entry = |g_ix: NodeIndex<SeqGraphIx>| -> FasNodeIndex {
+        let mut fas_node_entry = |g_ix: NodeIndex<usize>| -> FasNodeIndex {
             match graph_ix_lookup.get(&g_ix) {
                 Some(fas_ix) => *fas_ix,
                 None => {
@@ -217,7 +213,7 @@ struct FasNodeIndex(usize);
 #[derive(Debug)]
 struct FasNode {
     /// Node index in input graph.
-    graph_ix: NodeIndex<SeqGraphIx>,
+    graph_ix: NodeIndex<usize>,
 
     /// All outward edges from this node (not removed during processing)
     out_edges: Vec<FasNodeIndex>,
