@@ -18,8 +18,8 @@ type SeqGraphIx = usize;
 /// removed, make the graph acyclic.
 ///
 /// Uses a [greedy heuristic algorithm] to select a small number of edges, but does not necessarily
-/// find the minimum feedback arc set. Time complexity is **O(|V|² + |E|)**, for an input graph with
-/// nodes **V** and edges **E**.
+/// find the minimum feedback arc set. Time complexity is roughly **O(|E|)** for an input graph with
+/// edges **E**.
 ///
 /// Does not consider edge/node weights when selecting edges for the feedback arc set.
 ///
@@ -68,6 +68,7 @@ where
 {
     let node_seq = good_node_sequence(g.edge_references().map(|e| {
         (
+            // TODO: can we avoid this unwrapping/re-wrapping?
             NodeIndex::new(e.source().index()),
             NodeIndex::new(e.target().index()),
         )
@@ -84,7 +85,8 @@ fn good_node_sequence(
     let mut buckets = Buckets {
         sinks_or_isolated: NodeLinkedList::new(),
         sources: NodeLinkedList::new(),
-        bidirectional: HashMap::new(),
+        bidirectional_pve_dd: Vec::new(),
+        bidirectional_nve_dd: Vec::new(),
     };
     // Lookup of node indices from input graph to indices into `nodes`
     let mut graph_ix_lookup = HashMap::new();
@@ -152,11 +154,12 @@ fn good_node_sequence(
             s_1.push_back(nodes[source_fas_ix].data().graph_ix);
         }
 
-        if let Some((_bucket, list)) = buckets
-            .bidirectional
+        if let Some(list) = buckets
+            .bidirectional_pve_dd
             .iter_mut()
-            .filter(|(_bucket, head)| head.start.is_some())
-            .max_by_key(|(bucket, _ix)| *bucket)
+            .rev()
+            .chain(buckets.bidirectional_nve_dd.iter_mut())
+            .find(|b| b.start.is_some())
         {
             let highest_dd_fas_ix = list.pop(&mut nodes).unwrap();
             some_moved = true;
@@ -201,8 +204,10 @@ impl IndexMut<FasNodeIndex> for FasNodeContainer {
 struct Buckets {
     sinks_or_isolated: NodeLinkedList,
     sources: NodeLinkedList,
-    // TODO: replace with linked list for O(1) highest-value lookup
-    bidirectional: HashMap<isize, NodeLinkedList>,
+    /// Bidirectional nodes with positive-or-0 delta degree
+    bidirectional_pve_dd: Vec<NodeLinkedList>,
+    /// Bidirectional nodes with negative delta degree (index 0 is -1 dd, 1 is -2 etc)
+    bidirectional_nve_dd: Vec<NodeLinkedList>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -230,7 +235,6 @@ struct FasNode {
 }
 
 impl Buckets {
-    /// Returns the bucket that a node should belong to, not the list it's necessarily currently in
     fn suitable_bucket(
         &mut self,
         ix: FasNodeIndex,
@@ -244,9 +248,20 @@ impl Buckets {
             &mut self.sources
         } else {
             let delta_degree = node.out_degree as isize - node.in_degree as isize;
-            self.bidirectional
-                .entry(delta_degree)
-                .or_insert(LinkedList::new())
+
+            if delta_degree >= 0 {
+                let bucket_ix = delta_degree as usize;
+                while self.bidirectional_pve_dd.len() <= bucket_ix {
+                    self.bidirectional_pve_dd.push(NodeLinkedList::new());
+                }
+                &mut self.bidirectional_pve_dd[bucket_ix]
+            } else {
+                let bucket_ix = (-delta_degree - 1) as usize;
+                while self.bidirectional_nve_dd.len() <= bucket_ix {
+                    self.bidirectional_nve_dd.push(NodeLinkedList::new());
+                }
+                &mut self.bidirectional_nve_dd[bucket_ix]
+            }
         }
     }
 
